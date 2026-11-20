@@ -1,0 +1,36 @@
+name: proxygo
+arch: amd64
+platform: linux
+version: 0.1.0
+section: net
+priority: optional
+maintainer: ProxyGo maintainers
+description: HTTP DLP proxy with a Rust inspection engine
+license: Proprietary
+contents:
+  - src: ./engine-rust/target/release/proxygo-engine
+    dst: /usr/bin/proxygo-engine
+    file_info:
+      mode: 0755
+  - src: ./build/proxygo-proxy
+    dst: /usr/bin/proxygo-proxy
+    file_info:
+      mode: 0755
+  - src: ./build/proxygo-cli
+    dst: /usr/bin/proxygo-cli
+    file_info:
+      mode: 0755
+  - src: ./packaging/systemd/proxygo-engine.service
+    dst: /lib/systemd/system/proxygo-engine.service
+    file_info:
+      mode: 0644
+  - src: ./packaging/systemd/proxygo-proxy.service
+    dst: /lib/systemd/system/proxygo-proxy.service
+    file_info:
+      mode: 0644
+  - src: ./scripts/test-anomalies.sh
+    dst: /usr/share/proxygo/test-anomalies.sh
+    file_info:
+      mode: 0755
+scripts:
+  postinstall: ./scripts/postinstall.sh

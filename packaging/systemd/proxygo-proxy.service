@@ -1,0 +1,38 @@
+[Unit]
+Description=ProxyGo HTTP DLP proxy and observability panel
+After=network.target proxygo-engine.service
+
+[Service]
+Type=simple
+User=proxygo
+Group=proxygo
+RuntimeDirectory=proxygo
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0007
+Environment=PROXYGO_SOCK_PATH=/run/proxygo/engine.sock
+Environment=PROXYGO_MODE=MONITOR
+Environment=PROXYGO_FAILURE_POLICY=FAIL_CLOSED
+ExecStart=/usr/bin/proxygo-proxy
+Restart=always
+RestartSec=2s
+TimeoutStopSec=10s
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
