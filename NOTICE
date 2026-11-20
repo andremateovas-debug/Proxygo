@@ -1,0 +1,57 @@
+ProxyGo
+Copyright (c) 2026 Andre Mateo Vasquez Mosqueda / AM Devs
+
+================================================================================
+  ENGLISH (GOVERNING VERSION)
+================================================================================
+
+This software and its original architecture are developed and maintained by:
+Andre Mateo Vasquez Mosqueda / AM Devs
+
+This project is licensed under the Apache License, Version 2.0. You may obtain a
+copy of the License in the LICENSE file included in this repository or at:
+http://www.apache.org/licenses/LICENSE-2.0
+
+Under the terms of the Apache License 2.0:
+- You are free to use, study, modify, and distribute this software for personal
+  or commercial purposes.
+- Any redistribution of the Work or Derivative Works MUST retain this NOTICE
+  file and all original copyright notices.
+- Any modified files must carry prominent notices stating that you changed them.
+- You may not use the trade names, trademarks, or author names ("Andre Mateo
+  Vasquez Mosqueda" or "AM Devs") to endorse or promote derived products
+  without prior written permission.
+
+================================================================================
+  ESPAÑOL (TRADUCCIÓN INFORMATIVA)
+================================================================================
+
+Este software y su arquitectura original son desarrollados y mantenidos por:
+Andre Mateo Vasquez Mosqueda / AM Devs
+
+Este proyecto se distribuye bajo la Licencia Apache, Versión 2.0 (Apache 2.0).
+Puedes consultar el texto legal completo en el archivo LICENSE incluido en este
+repositorio o en: http://www.apache.org/licenses/LICENSE-2.0
+
+Bajo los términos de la Licencia Apache 2.0:
+- Tienes libertad para usar, estudiar, modificar y distribuir este software con
+  fines personales o comerciales.
+- Toda redistribución del código original o de trabajos derivados DEBE conservar
+  este archivo NOTICE y todos los avisos de copyright originales.
+- Cualquier archivo modificado debe incluir un aviso visible indicando que fue
+  alterado respecto a la versión original.
+- No está permitido utilizar los nombres comerciales, marcas o nombres de los
+  autores ("Andre Mateo Vasquez Mosqueda" o "AM Devs") para respaldar o
+  promocionar productos derivados sin autorización previa por escrito.
+
+================================================================================
+  LANGUAGE / IDIOMA
+================================================================================
+
+In the event of any discrepancy or conflict between the Spanish and English
+texts, the English version of the Apache License 2.0 in the LICENSE file shall
+prevail.
+
+En caso de discrepancia o conflicto entre los textos en español e inglés,
+prevalecerá la versión en inglés de la Licencia Apache 2.0 contenida en el
+archivo LICENSE.
