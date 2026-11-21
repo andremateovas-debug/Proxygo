@@ -37,4 +37,5 @@ coverage.*
 # Operating system / editor files
 .DS_Store
 Thumbs.db
-.idea/
+.idea/build/
+dist/

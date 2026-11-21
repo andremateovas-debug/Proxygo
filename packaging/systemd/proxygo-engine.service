@@ -4,6 +4,7 @@ After=local-fs.target
 Before=proxygo-proxy.service
 
 [Service]
+Environment="PROXYGO_SOCK_PATH=/run/proxygo/engine.sock"
 Type=simple
 User=proxygo
 Group=proxygo

@@ -71,7 +71,7 @@ MOCK_PID=$!
 
 # Compilar y levantar Rust Engine
 (cd engine-rust && cargo build --release --quiet)
-PROXYGO_SOCK_PATH="$SOCK_PATH" ./engine-rust/target/release/engine-rust &
+PROXYGO_SOCK_PATH="$SOCK_PATH" ./engine-rust/target/release/proxygo-engine &
 RUST_PID=$!
 sleep 1
 

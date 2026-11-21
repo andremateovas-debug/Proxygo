@@ -1,3 +1,3 @@
 module proxygo
 
-go 1.20
+go 1.22

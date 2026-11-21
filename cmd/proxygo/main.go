@@ -33,17 +33,17 @@ const (
 )
 
 type inspectionEvent struct {
-	ID        string    `json:"id,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
-	Method    string    `json:"method"`
-	Host      string    `json:"host"`
-	Mode      string    `json:"mode"`
-	Status    string    `json:"status"`
-	Category  string    `json:"category,omitempty"`
-	RiskLevel string    `json:"risk_level,omitempty"`
-	Findings  []Finding `json:"findings,omitempty"`
-	SanitizedBody string `json:"sanitized_body,omitempty"`
-	BodyTruncated bool `json:"body_truncated,omitempty"`
+	ID            string    `json:"id,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
+	Method        string    `json:"method"`
+	Host          string    `json:"host"`
+	Mode          string    `json:"mode"`
+	Status        string    `json:"status"`
+	Category      string    `json:"category,omitempty"`
+	RiskLevel     string    `json:"risk_level,omitempty"`
+	Findings      []Finding `json:"findings,omitempty"`
+	SanitizedBody string    `json:"sanitized_body,omitempty"`
+	BodyTruncated bool      `json:"body_truncated,omitempty"`
 }
 
 type activeMode struct {
@@ -136,12 +136,14 @@ func run() error {
 	if socketPath == "" {
 		socketPath = defaultSocketPath
 	}
+	proxyAddr := configuredAddr("PROXYGO_PROXY_ADDR", "127.0.0.1:8080")
+	dashAddr := configuredAddr("PROXYGO_DASH_ADDR", "127.0.0.1:8081")
 
 	events := newEventHub()
 	engine := newUDSClient(socketPath, policy, log.Default())
 	modes := newActiveMode(mode)
-	proxy := newHTTPProxy(engine, modes, events)
-	internal := newInternalServer(events, modes)
+	proxy := newHTTPProxy(engine, modes, events, proxyAddr)
+	internal := newInternalServer(events, modes, dashAddr)
 	servers := []*http.Server{proxy, internal}
 	serveErrors := make(chan error, len(servers))
 	for _, server := range servers {
@@ -150,7 +152,7 @@ func run() error {
 			serveErrors <- server.ListenAndServe()
 		}()
 	}
-	log.Printf("ProxyGo listening on :8080; internal UI and events on :8081 (mode=%s, policy=%s)", mode, policy)
+	log.Printf("ProxyGo listening on %s; internal UI and events on %s (mode=%s, policy=%s)", proxyAddr, dashAddr, mode, policy)
 
 	shutdownSignal, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -194,6 +196,13 @@ func run() error {
 	return nil
 }
 
+func configuredAddr(envKey, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(envKey)); value != "" {
+		return value
+	}
+	return fallback
+}
+
 func configuredMode() (inspectionMode, error) {
 	value := strings.ToUpper(strings.TrimSpace(os.Getenv("PROXYGO_MODE")))
 	if value == "" {
@@ -220,7 +229,7 @@ func configuredFailurePolicy() (FailurePolicy, error) {
 	return policy, nil
 }
 
-func newHTTPProxy(engine *udsClient, modes *activeMode, events *eventHub) *http.Server {
+func newHTTPProxy(engine *udsClient, modes *activeMode, events *eventHub, addr string) *http.Server {
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
 			target := *request.In.URL
@@ -309,7 +318,7 @@ func newHTTPProxy(engine *udsClient, modes *activeMode, events *eventHub) *http.
 	})
 
 	return &http.Server{
-		Addr:              ":8080",
+		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -329,7 +338,7 @@ func resetRequestBody(r *http.Request, body []byte) {
 	r.Header.Del("Expect")
 }
 
-func newInternalServer(events *eventHub, modes *activeMode) *http.Server {
+func newInternalServer(events *eventHub, modes *activeMode, addr string) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/mode", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -397,7 +406,7 @@ func newInternalServer(events *eventHub, modes *activeMode) *http.Server {
 				}
 				flusher.Flush()
 			case <-heartbeat.C:
-				if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
 					return
 				}
 				flusher.Flush()
@@ -407,7 +416,7 @@ func newInternalServer(events *eventHub, modes *activeMode) *http.Server {
 	mux.Handle("/", http.FileServer(http.FS(web.Assets)))
 
 	return &http.Server{
-		Addr:              ":8081",
+		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
