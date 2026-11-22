@@ -3,102 +3,89 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<meta name="theme-color" content="#101513" />
-		<title>ProxyGo | Observabilidad</title>
-		<link rel="preconnect" href="https://fonts.googleapis.com" />
-		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-		<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
+		<meta name="theme-color" content="#ffffff" />
+		<title>ProxyGo · Monitor</title>
 		<link rel="stylesheet" href="/styles.css" />
 		<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js" defer></script>
 		<script src="/app.js" defer></script>
 	</head>
 	<body>
-		<div class="app-shell">
+		<div class="layout">
 			<header class="topbar">
-				<a class="brand" href="/" aria-label="ProxyGo observabilidad">
-					<span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-					<span class="brand-name">proxy<span>go</span></span>
-					<span class="brand-divider"></span>
-					<span class="brand-section">OBSERVABILIDAD</span>
-				</a>
-				<div class="topbar-right">
-					<div class="stream-status" id="streamStatus" data-state="connecting" role="status" aria-live="polite">
-						<span class="status-dot"></span>
-						<span id="streamStatusText">Conectando</span>
+				<div class="topbar-inner">
+					<a class="brand" href="/">
+						<span class="brand-dot" aria-hidden="true"></span>
+						<span class="brand-name">ProxyGo</span>
+					</a>
+					<div class="topbar-actions">
+						<span class="status-pill" id="streamStatus" data-state="connecting" role="status" aria-live="polite">
+							<span class="status-indicator"></span>
+							<span id="streamStatusText">Conectando</span>
+						</span>
+						<label class="mode-picker" for="modeSelect">
+							<span>Modo</span>
+							<select id="modeSelect" aria-label="Modo de inspección">
+								<option value="MONITOR">Monitor</option>
+								<option value="SANITIZE">Sanitize</option>
+								<option value="BLOCK">Block</option>
+							</select>
+						</label>
 					</div>
-					<label class="mode-control" for="modeSelect">
-						<span class="mode-label">MODO</span>
-						<select id="modeSelect" aria-label="Modo de inspección">
-							<option value="MONITOR">Monitor</option>
-							<option value="SANITIZE">Sanitize</option>
-							<option value="BLOCK">Block</option>
-						</select>
-						<span class="select-chevron" aria-hidden="true">⌄</span>
-					</label>
 				</div>
 			</header>
 
-			<main class="main-content">
-				<section class="page-heading" aria-labelledby="pageTitle">
+			<main class="container">
+				<section class="page-head">
 					<div>
-						<p class="eyebrow"><span class="eyebrow-line"></span> TRAFFIC CONTROL / 01</p>
-						<h1 id="pageTitle">Tráfico inspeccionado</h1>
+						<h1>Tráfico inspeccionado</h1>
+						<p class="subtitle">Actividad del proxy DLP en tiempo real</p>
 					</div>
-					<div class="heading-meta"><span class="live-pulse"></span><span>EN VIVO</span><time id="currentTime">--:--:--</time></div>
+					<time class="clock" id="currentTime">--:--:--</time>
 				</section>
 
-				<section class="metrics" aria-label="Resumen del tráfico">
-					<article class="metric metric-primary">
-						<div class="metric-head"><span>PETICIONES / MIN</span><span class="metric-symbol">↗</span></div>
-						<div class="metric-value" id="requestsPerMinute">0</div>
-						<div class="metric-foot"><span class="metric-line"></span>último minuto</div>
+				<section class="stats-grid" aria-label="Resumen del tráfico">
+					<article class="stat-card">
+						<span class="stat-label">Peticiones / min</span>
+						<strong class="stat-value" id="requestsPerMinute">0</strong>
 					</article>
-					<article class="metric">
-						<div class="metric-head"><span>LIMPIAS</span><span class="metric-symbol clean-symbol">●</span></div>
-						<div class="metric-value" id="cleanCount">0</div>
-						<div class="metric-foot">sin hallazgos</div>
+					<article class="stat-card">
+						<span class="stat-label">Limpias</span>
+						<strong class="stat-value text-clean" id="cleanCount">0</strong>
 					</article>
-					<article class="metric">
-						<div class="metric-head"><span>ALERTAS</span><span class="metric-symbol alert-symbol">◆</span></div>
-						<div class="metric-value" id="alertCount">0</div>
-						<div class="metric-foot">hallazgos detectados</div>
+					<article class="stat-card">
+						<span class="stat-label">Alertas</span>
+						<strong class="stat-value text-alert" id="alertCount">0</strong>
 					</article>
-					<article class="metric metric-mode">
-						<div class="metric-head"><span>POLÍTICA ACTIVA</span><span class="metric-symbol">◉</span></div>
-						<div class="metric-value mode-value" id="activeMode">MONITOR</div>
-						<div class="metric-foot">control de inspección</div>
+					<article class="stat-card">
+						<span class="stat-label">Política activa</span>
+						<strong class="stat-value stat-mode" id="activeMode">MONITOR</strong>
 					</article>
 				</section>
 
-				<section class="chart-panel" aria-labelledby="chartTitle">
-					<div class="section-heading chart-heading">
-						<div>
-							<p class="eyebrow">VOLUMEN DE TRÁFICO</p>
-							<h2 id="chartTitle">Peticiones y alertas</h2>
-						</div>
-						<div class="chart-legend" aria-label="Leyenda de la gráfica">
-							<span><i class="legend-clean"></i>Limpias</span>
-							<span><i class="legend-alert"></i>Alertas</span>
-							<span class="chart-range">30 MIN</span>
+				<section class="card chart-card" aria-labelledby="chartTitle">
+					<div class="card-header">
+						<h2 id="chartTitle">Tráfico por minuto</h2>
+						<div class="legend">
+							<span><i class="dot-clean"></i>Limpias</span>
+							<span><i class="dot-alert"></i>Alertas</span>
+							<span class="range-tag">Últimos 30 min</span>
 						</div>
 					</div>
-					<div class="chart-wrap"><canvas id="trafficChart" aria-label="Peticiones limpias y alertas por minuto" role="img"></canvas></div>
-					<div class="chart-fallback" id="chartFallback" hidden>Gráfica no disponible: no se pudo cargar Chart.js.</div>
+					<div class="chart-box">
+						<canvas id="trafficChart" aria-label="Peticiones limpias y alertas por minuto" role="img"></canvas>
+					</div>
+					<p class="chart-fallback" id="chartFallback" hidden>No se pudo cargar Chart.js.</p>
 				</section>
 
-				<section class="events-panel" aria-labelledby="eventsTitle">
-					<div class="section-heading events-heading">
-						<div>
-							<p class="eyebrow">INSPECCIÓN RECIENTE <span class="event-total" id="eventTotal">0</span></p>
-							<h2 id="eventsTitle">Registro de eventos</h2>
+				<section class="card table-card" aria-labelledby="eventsTitle">
+					<div class="card-header table-header">
+						<div class="table-title">
+							<h2 id="eventsTitle">Eventos recientes</h2>
+							<span class="count-badge" id="eventTotal">0</span>
 						</div>
-						<div class="table-tools">
-							<label class="search-box">
-								<span aria-hidden="true">⌕</span>
-								<input id="eventSearch" type="search" placeholder="Buscar host o categoría" aria-label="Buscar host o categoría" />
-								<kbd>/</kbd>
-							</label>
-							<select id="riskFilter" class="filter-select" aria-label="Filtrar por riesgo">
+						<div class="filters">
+							<input id="eventSearch" class="input" type="search" placeholder="Buscar host o categoría…" aria-label="Buscar host o categoría" />
+							<select id="riskFilter" class="input select" aria-label="Filtrar por riesgo">
 								<option value="ALL">Todos los riesgos</option>
 								<option value="HIGH">Alto</option>
 								<option value="MEDIUM">Medio</option>
@@ -106,46 +93,51 @@
 							</select>
 						</div>
 					</div>
-					<div class="table-scroll">
+					<div class="table-wrap">
 						<table>
 							<thead>
 								<tr>
-									<th scope="col">HORA</th>
-									<th scope="col">CATEGORÍA</th>
-									<th scope="col">HOST DESTINO</th>
-									<th scope="col">RIESGO</th>
-									<th scope="col">ACCIÓN</th>
+									<th scope="col">Hora</th>
+									<th scope="col">Categoría</th>
+									<th scope="col">Host</th>
+									<th scope="col">Riesgo</th>
+									<th scope="col">Acción</th>
 									<th scope="col"><span class="sr-only">Detalle</span></th>
 								</tr>
 							</thead>
 							<tbody id="eventRows">
-								<tr class="empty-row"><td colspan="6"><span class="empty-mark">—</span>Esperando eventos de inspección</td></tr>
+								<tr class="empty-row"><td colspan="6">Esperando eventos de inspección</td></tr>
 							</tbody>
 						</table>
 					</div>
-					<footer class="table-footer">
-						<span id="visibleRange">0 eventos en memoria</span>
-						<span class="retention-indicator"><i></i> HISTORIAL LIMITADO</span>
-					</footer>
+					<div class="table-foot">
+						<span id="visibleRange">0 eventos</span>
+					</div>
 				</section>
 			</main>
-
-			<footer class="app-footer"><span>PROXYGO DLP ENGINE</span><span>LOCAL CONTROL PLANE <i></i></span></footer>
 		</div>
 
-		<dialog id="eventDialog" class="detail-dialog" aria-labelledby="detailTitle">
-			<form method="dialog" class="dialog-close-form"><button class="icon-button" aria-label="Cerrar detalle">×</button></form>
-			<div class="dialog-content">
-				<p class="eyebrow"><span class="eyebrow-line"></span> EVENTO DE INSPECCIÓN</p>
-				<div class="detail-title-row">
-					<div><h2 id="detailTitle">Detalle de evento</h2><p id="detailMeta" class="detail-meta"></p></div>
-					<span id="detailRisk" class="risk-badge">—</span>
+		<dialog id="eventDialog" class="dialog" aria-labelledby="detailTitle">
+			<div class="dialog-head">
+				<div>
+					<h2 id="detailTitle">Detalle del evento</h2>
+					<p id="detailMeta" class="detail-meta"></p>
 				</div>
-				<div class="json-toolbar"><span>CUERPO SANITIZADO</span><span id="detailTruncated" class="truncated-note" hidden>VISTA PARCIAL · 64 KB</span></div>
-				<pre class="json-view"><code id="detailJson"></code></pre>
-				<div class="finding-list" id="detailFindings"></div>
+				<div class="dialog-head-right">
+					<span id="detailRisk" class="badge">—</span>
+					<form method="dialog"><button class="close-btn" aria-label="Cerrar">×</button></form>
+				</div>
+			</div>
+			<div class="dialog-body">
+				<div class="json-bar">
+					<span>Cuerpo sanitizado</span>
+					<span id="detailTruncated" class="truncated" hidden>Vista parcial (64 KB)</span>
+				</div>
+				<pre class="json-box"><code id="detailJson"></code></pre>
+				<div class="findings" id="detailFindings"></div>
 			</div>
 		</dialog>
+
 		<div class="toast" id="toast" role="status" aria-live="polite"></div>
 	</body>
 </html>

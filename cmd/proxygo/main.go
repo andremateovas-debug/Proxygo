@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,8 +22,12 @@ import (
 	"proxygo/web"
 )
 
-const maxRequestBodyBytes = 32 << 20
-const maxEventBodyBytes = 64 << 10
+const (
+	maxRequestBodyBytes = 32 << 20
+	maxEventBodyBytes   = 64 << 10
+	maxHistoryEvents    = 500
+	bucketRetentionMins = 60
+)
 
 type inspectionMode string
 
@@ -33,6 +38,7 @@ const (
 )
 
 type inspectionEvent struct {
+	Seq           uint64    `json:"seq,omitempty"`
 	ID            string    `json:"id,omitempty"`
 	Timestamp     time.Time `json:"timestamp"`
 	Method        string    `json:"method"`
@@ -44,6 +50,21 @@ type inspectionEvent struct {
 	Findings      []Finding `json:"findings,omitempty"`
 	SanitizedBody string    `json:"sanitized_body,omitempty"`
 	BodyTruncated bool      `json:"body_truncated,omitempty"`
+}
+
+type minuteBucket struct {
+	Minute int64  `json:"minute"`
+	Clean  uint64 `json:"clean"`
+	Alerts uint64 `json:"alerts"`
+}
+
+type dashboardState struct {
+	Mode       string            `json:"mode"`
+	Seq        uint64            `json:"seq"`
+	CleanCount uint64            `json:"clean_count"`
+	AlertCount uint64            `json:"alert_count"`
+	Buckets    []minuteBucket    `json:"buckets"`
+	Events     []inspectionEvent `json:"events"`
 }
 
 type activeMode struct {
@@ -67,10 +88,19 @@ func (m *activeMode) set(mode inspectionMode) {
 type eventHub struct {
 	mu          sync.RWMutex
 	subscribers map[chan []byte]struct{}
+	seq         uint64
+	cleanCount  uint64
+	alertCount  uint64
+	buckets     map[int64]*minuteBucket
+	history     []inspectionEvent
 }
 
 func newEventHub() *eventHub {
-	return &eventHub{subscribers: make(map[chan []byte]struct{})}
+	return &eventHub{
+		subscribers: make(map[chan []byte]struct{}),
+		buckets:     make(map[int64]*minuteBucket),
+		history:     make([]inspectionEvent, 0, maxHistoryEvents),
+	}
 }
 
 func (h *eventHub) subscribe() (chan []byte, bool) {
@@ -93,14 +123,57 @@ func (h *eventHub) unsubscribe(ch chan []byte) {
 	}
 }
 
+func isAlertEvent(event inspectionEvent) bool {
+	switch strings.ToLower(event.Status) {
+	case "blocked", "sanitized", "engine_unavailable":
+		return true
+	}
+	return strings.EqualFold(event.RiskLevel, "HIGH") || len(event.Findings) > 0
+}
+
 func (h *eventHub) publish(event inspectionEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.seq++
+	event.Seq = h.seq
+
+	ts := event.Timestamp
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+		event.Timestamp = ts
+	}
+	minuteKey := (ts.UTC().Unix() / 60) * 60000
+	bucket, ok := h.buckets[minuteKey]
+	if !ok {
+		bucket = &minuteBucket{Minute: minuteKey}
+		h.buckets[minuteKey] = bucket
+	}
+	if isAlertEvent(event) {
+		h.alertCount++
+		bucket.Alerts++
+	} else {
+		h.cleanCount++
+		bucket.Clean++
+	}
+
+	cutoff := ((time.Now().UTC().Unix() / 60) - bucketRetentionMins) * 60000
+	for k := range h.buckets {
+		if k < cutoff {
+			delete(h.buckets, k)
+		}
+	}
+
+	h.history = append(h.history, event)
+	if len(h.history) > maxHistoryEvents {
+		h.history = h.history[len(h.history)-maxHistoryEvents:]
+	}
+
 	data, err := json.Marshal(event)
 	if err != nil {
 		log.Printf("encode SSE event: %v", err)
 		return
 	}
-	h.mu.RLock()
-	defer h.mu.RUnlock()
 	for subscriber := range h.subscribers {
 		select {
 		case subscriber <- data:
@@ -114,6 +187,36 @@ func (h *eventHub) publish(event inspectionEvent) {
 			default:
 			}
 		}
+	}
+}
+
+func (h *eventHub) snapshot(currentMode string) dashboardState {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	cutoff := ((time.Now().UTC().Unix() / 60) - bucketRetentionMins) * 60000
+	buckets := make([]minuteBucket, 0, len(h.buckets))
+	for _, b := range h.buckets {
+		if b.Minute >= cutoff {
+			buckets = append(buckets, *b)
+		}
+	}
+	sort.Slice(buckets, func(i, j int) bool {
+		return buckets[i].Minute < buckets[j].Minute
+	})
+
+	events := make([]inspectionEvent, len(h.history))
+	for i := range h.history {
+		events[i] = h.history[len(h.history)-1-i]
+	}
+
+	return dashboardState{
+		Mode:       currentMode,
+		Seq:        h.seq,
+		CleanCount: h.cleanCount,
+		AlertCount: h.alertCount,
+		Buckets:    buckets,
+		Events:     events,
 	}
 }
 
@@ -340,6 +443,16 @@ func resetRequestBody(r *http.Request, body []byte) {
 
 func newInternalServer(events *eventHub, modes *activeMode, addr string) *http.Server {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", "GET")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(events.snapshot(string(modes.current())))
+	})
 	mux.HandleFunc("/api/mode", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
@@ -406,14 +519,18 @@ func newInternalServer(events *eventHub, modes *activeMode, addr string) *http.S
 				}
 				flusher.Flush()
 			case <-heartbeat.C:
-				if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+				if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 					return
 				}
 				flusher.Flush()
 			}
 		}
 	})
-	mux.Handle("/", http.FileServer(http.FS(web.Assets)))
+	fileServer := http.FileServer(http.FS(web.Assets))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		fileServer.ServeHTTP(w, r)
+	})
 
 	return &http.Server{
 		Addr:              addr,

@@ -8,6 +8,14 @@
 	const records = [];
 	const counters = { clean: 0, alerts: 0 };
 	const minuteBuckets = new Map();
+	const pendingQueue = [];
+
+	let lastSeq = 0;
+	let stateReady = false;
+	let chart = null;
+	let eventSource = null;
+	let toastTimer = 0;
+
 	const elements = {
 		status: document.getElementById("streamStatus"),
 		statusText: document.getElementById("streamStatusText"),
@@ -34,14 +42,16 @@
 		chartCanvas: document.getElementById("trafficChart")
 	};
 
-	let chart = null;
-	let eventSource = null;
-	let toastTimer = 0;
-
 	function riskLevel(event) {
 		const level = String(event.risk_level || "UNKNOWN").toUpperCase();
 		if (["HIGH", "MEDIUM", "LOW"].includes(level)) return level;
 		return event.findings?.length ? "HIGH" : "LOW";
+	}
+
+	function isAlertEvent(event) {
+		return ["blocked", "sanitized", "engine_unavailable"].includes(String(event.status).toLowerCase())
+			|| riskLevel(event) === "HIGH"
+			|| Boolean(event.findings?.length);
 	}
 
 	function actionFor(event) {
@@ -95,51 +105,71 @@
 			data: {
 				labels,
 				datasets: [
-					{ label: "Limpias", data: Array(MINUTE_WINDOW).fill(0), borderColor: "#65d997", backgroundColor: "rgba(101,217,151,.08)", pointBackgroundColor: "#a6f2c5", pointRadius: 2, pointHoverRadius: 4, borderWidth: 2, tension: .32, fill: true },
-					{ label: "Alertas", data: Array(MINUTE_WINDOW).fill(0), borderColor: "#ff8478", backgroundColor: "rgba(255,132,120,.04)", pointBackgroundColor: "#ff8478", pointRadius: 2, pointHoverRadius: 4, borderWidth: 1.5, tension: .32, fill: false }
+					{
+						label: "Limpias",
+						data: Array(MINUTE_WINDOW).fill(0),
+						borderColor: "#16a34a",
+						backgroundColor: "rgba(22, 163, 74, 0.08)",
+						pointRadius: 2,
+						pointHoverRadius: 4,
+						borderWidth: 2,
+						tension: 0.25,
+						fill: true
+					},
+					{
+						label: "Alertas",
+						data: Array(MINUTE_WINDOW).fill(0),
+						borderColor: "#dc2626",
+						backgroundColor: "rgba(220, 38, 38, 0.05)",
+						pointRadius: 2,
+						pointHoverRadius: 4,
+						borderWidth: 2,
+						tension: 0.25,
+						fill: false
+					}
 				]
 			},
 			options: {
 				responsive: true,
 				maintainAspectRatio: false,
-				animation: { duration: 280 },
+				animation: { duration: 200 },
 				interaction: { intersect: false, mode: "index" },
 				plugins: {
 					legend: { display: false },
-					tooltip: { backgroundColor: "#202b26", borderColor: "#35443c", borderWidth: 1, titleColor: "#e7eee9", bodyColor: "#aebbb2", padding: 10, displayColors: true }
+					tooltip: {
+						backgroundColor: "#ffffff",
+						borderColor: "#e2e8f0",
+						borderWidth: 1,
+						titleColor: "#0f172a",
+						bodyColor: "#475569",
+						padding: 10
+					}
 				},
 				scales: {
-					x: { grid: { display: false }, border: { display: false }, ticks: { color: "#68776e", maxTicksLimit: 8, maxRotation: 0, font: { family: "DM Mono", size: 9 } } },
-					y: { beginAtZero: true, border: { display: false }, grid: { color: "rgba(130,144,135,.11)" }, ticks: { color: "#68776e", precision: 0, maxTicksLimit: 5, padding: 8, font: { family: "DM Mono", size: 9 } } }
+					x: {
+						grid: { display: false },
+						border: { display: false },
+						ticks: { color: "#64748b", maxTicksLimit: 8, maxRotation: 0, font: { size: 11 } }
+					},
+					y: {
+						beginAtZero: true,
+						border: { display: false },
+						grid: { color: "#f1f5f9" },
+						ticks: { color: "#64748b", precision: 0, maxTicksLimit: 5, font: { size: 11 } }
+					}
 				}
 			}
 		});
 	}
 
-	function addToChart(event) {
-		const timestamp = new Date(event.timestamp || Date.now()).getTime();
-		const minute = Math.floor(timestamp / 60_000) * 60_000;
-		const isAlert = ["blocked", "sanitized", "engine_unavailable"].includes(String(event.status).toLowerCase())
-			|| riskLevel(event) === "HIGH"
-			|| Boolean(event.findings?.length);
-		const bucket = minuteBuckets.get(minute) || { clean: 0, alerts: 0 };
-		bucket[isAlert ? "alerts" : "clean"] += 1;
-		minuteBuckets.set(minute, bucket);
-
-		const oldest = Math.floor(Date.now() / 60_000) * 60_000 - (MINUTE_WINDOW - 1) * 60_000;
-		for (const key of minuteBuckets.keys()) if (key < oldest) minuteBuckets.delete(key);
-		if (isAlert) counters.alerts += 1;
-		else counters.clean += 1;
-		updateMetrics();
-
-		if (chart) {
-			const nowMinute = Math.floor(Date.now() / 60_000) * 60_000;
-			const visibleMinutes = Array.from({ length: MINUTE_WINDOW }, (_, index) => nowMinute - (MINUTE_WINDOW - index - 1) * 60_000);
-			chart.data.labels = visibleMinutes.map(time => new Date(time).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", hour12: false }));
-			chart.data.datasets[0].data = visibleMinutes.map(time => minuteBuckets.get(time)?.clean || 0);
-			chart.data.datasets[1].data = visibleMinutes.map(time => minuteBuckets.get(time)?.alerts || 0);
-			chart.update("none");
-		}
+	function refreshChart() {
+		if (!chart) return;
+		const nowMinute = Math.floor(Date.now() / 60_000) * 60_000;
+		const visibleMinutes = Array.from({ length: MINUTE_WINDOW }, (_, index) => nowMinute - (MINUTE_WINDOW - index - 1) * 60_000);
+		chart.data.labels = visibleMinutes.map(time => new Date(time).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", hour12: false }));
+		chart.data.datasets[0].data = visibleMinutes.map(time => minuteBuckets.get(time)?.clean || 0);
+		chart.data.datasets[1].data = visibleMinutes.map(time => minuteBuckets.get(time)?.alerts || 0);
+		chart.update("none");
 	}
 
 	function updateMetrics() {
@@ -148,6 +178,34 @@
 		elements.requestsPerMinute.textContent = String(currentBucket.clean + currentBucket.alerts);
 		elements.cleanCount.textContent = counters.clean.toLocaleString("es-MX");
 		elements.alertCount.textContent = counters.alerts.toLocaleString("es-MX");
+	}
+
+	function applyLiveEvent(event) {
+		if (typeof event.seq === "number") {
+			if (event.seq <= lastSeq) return;
+			lastSeq = event.seq;
+		}
+
+		records.unshift(event);
+		if (records.length > MAX_RECORDS) records.length = MAX_RECORDS;
+
+		const timestamp = new Date(event.timestamp || Date.now()).getTime();
+		const minute = Math.floor(timestamp / 60_000) * 60_000;
+		const alert = isAlertEvent(event);
+		const bucket = minuteBuckets.get(minute) || { clean: 0, alerts: 0 };
+		bucket[alert ? "alerts" : "clean"] += 1;
+		minuteBuckets.set(minute, bucket);
+
+		const oldest = Math.floor(Date.now() / 60_000) * 60_000 - (MINUTE_WINDOW - 1) * 60_000;
+		for (const key of minuteBuckets.keys()) {
+			if (key < oldest) minuteBuckets.delete(key);
+		}
+		if (alert) counters.alerts += 1;
+		else counters.clean += 1;
+
+		updateMetrics();
+		refreshChart();
+		renderRows();
 	}
 
 	function makeCell(className, text) {
@@ -192,23 +250,24 @@
 
 				row.append(makeCell("time-cell", formatTime(event.timestamp)));
 				row.append(makeCell("category-cell", event.category || "UNKNOWN"));
-				const host = makeCell("host-cell", event.host || "—");
-				row.append(host);
+				row.append(makeCell("host-cell", event.host || "—"));
+
 				const riskCell = document.createElement("td");
 				const badge = document.createElement("span");
 				const risk = riskLevel(event);
-				badge.className = `risk-badge risk-${risk.toLowerCase()}`;
+				badge.className = `badge risk-${risk.toLowerCase()}`;
 				badge.textContent = risk === "UNKNOWN" ? "SIN DATO" : risk;
 				riskCell.append(badge);
 				row.append(riskCell);
+
 				const actionCell = document.createElement("td");
-				actionCell.className = "action-cell";
 				const action = actionFor(event);
 				const actionLabel = document.createElement("span");
 				actionLabel.className = `action-label ${action.className}`;
 				actionLabel.textContent = action.label;
 				actionCell.append(actionLabel);
 				row.append(actionCell);
+
 				row.append(makeCell("row-arrow", "›"));
 				fragment.append(row);
 			});
@@ -216,7 +275,7 @@
 		}
 
 		elements.eventTotal.textContent = String(records.length);
-		elements.visibleRange.textContent = `${visible.length} visibles · ${records.length} en memoria`;
+		elements.visibleRange.textContent = `${visible.length} de ${records.length} eventos recientes`;
 	}
 
 	function appendHighlightedText(container, text) {
@@ -236,9 +295,9 @@
 	function openDetails(event) {
 		const time = formatTime(event.timestamp);
 		elements.detailTitle.textContent = event.category || "Evento inspeccionado";
-		elements.detailMeta.textContent = `${time}  /  ${event.method || "—"}  /  ${event.host || "host desconocido"}`;
+		elements.detailMeta.textContent = `${time} · ${event.method || "—"} · ${event.host || "host desconocido"}`;
 		const risk = riskLevel(event);
-		elements.detailRisk.className = `risk-badge risk-${risk.toLowerCase()}`;
+		elements.detailRisk.className = `badge risk-${risk.toLowerCase()}`;
 		elements.detailRisk.textContent = risk;
 		elements.detailTruncated.hidden = !event.body_truncated;
 
@@ -262,15 +321,41 @@
 		elements.dialog.showModal();
 	}
 
-	async function loadMode() {
+	async function loadState() {
 		try {
-			const response = await fetch("/api/mode", { headers: { Accept: "application/json" } });
-			if (!response.ok) throw new Error("No se pudo consultar el modo");
-			const payload = await response.json();
-			if (["MONITOR", "SANITIZE", "BLOCK"].includes(payload.mode)) {
-				elements.modeSelect.value = payload.mode;
-				elements.activeMode.textContent = payload.mode;
+			const response = await fetch("/api/state", { headers: { Accept: "application/json" }, cache: "no-store" });
+			if (!response.ok) throw new Error("No se pudo cargar el estado del servidor");
+			const state = await response.json();
+
+			if (["MONITOR", "SANITIZE", "BLOCK"].includes(state.mode)) {
+				elements.modeSelect.value = state.mode;
+				elements.activeMode.textContent = state.mode;
 			}
+			lastSeq = Number(state.seq || 0);
+			counters.clean = Number(state.clean_count || 0);
+			counters.alerts = Number(state.alert_count || 0);
+
+			minuteBuckets.clear();
+			for (const bucket of state.buckets || []) {
+				minuteBuckets.set(Number(bucket.minute), {
+					clean: Number(bucket.clean || 0),
+					alerts: Number(bucket.alerts || 0)
+				});
+			}
+
+			records.length = 0;
+			for (const event of state.events || []) {
+				records.push(event);
+				if (records.length >= MAX_RECORDS) break;
+			}
+
+			stateReady = true;
+			while (pendingQueue.length) {
+				applyLiveEvent(pendingQueue.shift());
+			}
+			updateMetrics();
+			refreshChart();
+			renderRows();
 		} catch (error) {
 			showToast(error.message, true);
 		}
@@ -299,16 +384,20 @@
 	function connectEvents() {
 		if (eventSource) eventSource.close();
 		eventSource = new EventSource("/events");
-		eventSource.onopen = () => setStreamState("connected", "Stream activo");
+		eventSource.onopen = () => {
+			setStreamState("connected", "Conectado");
+			loadState();
+		};
 		eventSource.onmessage = message => {
 			try {
 				const event = JSON.parse(message.data);
-				records.unshift(event);
-				if (records.length > MAX_RECORDS) records.length = MAX_RECORDS;
-				addToChart(event);
-				renderRows();
+				if (!stateReady) {
+					pendingQueue.push(event);
+					return;
+				}
+				applyLiveEvent(event);
 			} catch {
-				showToast("Se recibió un evento con formato inválido", true);
+				showToast("Evento con formato inválido", true);
 			}
 		};
 		eventSource.onerror = () => setStreamState("disconnected", "Reconectando");
@@ -328,7 +417,10 @@
 	initChart();
 	updateClock();
 	window.setInterval(updateClock, 1000);
-	window.setInterval(updateMetrics, 1000);
-	loadMode();
+	window.setInterval(() => {
+		updateMetrics();
+		refreshChart();
+	}, 5000);
+	loadState();
 	connectEvents();
 })();
