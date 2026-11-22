@@ -159,6 +159,41 @@ Si instalaste el paquete `.deb`, también puedes lanzar pruebas rápidas contra 
 
 ---
 
+## Dashboard y ejemplos en vivo
+
+![Dashboard de ProxyGo](readme-imgs/dashboard.png)
+
+*Panel de monitoreo con métricas, tráfico por minuto y eventos recientes.*
+
+### Ejemplos de detección
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="readme-imgs/ejemplo2.png" alt="Detección y sanitización de una API key de Anthropic" width="100%"><br>
+      <strong>Sanitización de una clave de Anthropic</strong>
+    </td>
+    <td align="center">
+      <img src="readme-imgs/ejemplo3.png" alt="Detección y sanitización de una clave AWS" width="100%"><br>
+      <strong>Sanitización de una clave AWS</strong>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="readme-imgs/ejemploseguro.png" alt="Solicitud segura sin secretos detectados" width="100%"><br>
+      <strong>Solicitud segura</strong>
+    </td>
+    <td align="center">
+      <img src="readme-imgs/enviobloqueado.png" alt="Evento bloqueado en el dashboard" width="100%"><br>
+      <strong>Evento bloqueado</strong>
+    </td>
+  </tr>
+</table>
+
+Si quieres probar el dashboard con peticiones rápidas y ver cómo reaccionan las alertas, sigue las instrucciones de [Pruebas rápidas en vivo](test_de_reaccion.md).
+
+---
+
 ## Licencia y Atribución
 
 Este proyecto está licenciado bajo la **Licencia Apache, Versión 2.0**. Consulta los archivos [LICENSE](LICENSE) y [NOTICE](NOTICE) para más detalles.
