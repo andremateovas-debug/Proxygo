@@ -147,6 +147,11 @@ type tuiTestCase struct {
 	tls  bool
 }
 
+type tuiEndpoints struct {
+	dashboardURL string
+	proxyURL     string
+}
+
 var tuiTestCases = []tuiTestCase{
 	{name: "Solicitud simple y segura", url: "http://httpbin.org/post", body: `{"model":"claude-3-7-sonnet","prompt":"Explica que es un Unix Domain Socket"}`},
 	{name: "Fuga de API Key (Anthropic)", url: "http://httpbin.org/post", body: `{"model":"claude-3-7-sonnet","prompt":"Mi llave es sk-ant-api03-99887766554433221100aabbccddeeff"}`},
@@ -156,20 +161,16 @@ var tuiTestCases = []tuiTestCase{
 }
 
 func runTUI() error {
+	endpoints, err := resolveTUIEndpoints(os.Getenv)
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	dashboardAddr := strings.TrimSpace(os.Getenv("PROXYGO_DASH_ADDR"))
-	if dashboardAddr == "" {
-		dashboardAddr = "127.0.0.1:8081"
-	}
-	proxyAddr := strings.TrimSpace(os.Getenv("PROXYGO_PROXY_ADDR"))
-	if proxyAddr == "" {
-		proxyAddr = "127.0.0.1:8080"
-	}
 	model := tuiModel{
 		ctx:          ctx,
-		dashboardURL: endpointURL(dashboardAddr),
-		proxyURL:     endpointURL(proxyAddr),
+		dashboardURL: endpoints.dashboardURL,
+		proxyURL:     endpoints.proxyURL,
 		proxyClient:  &http.Client{Timeout: 8 * time.Second},
 		streamClient: &http.Client{},
 		stream:       make(chan tuiStreamResult, 32),
@@ -178,15 +179,46 @@ func runTUI() error {
 		status:       "Conectando al dashboard…",
 	}
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	_, err := program.Run()
+	_, err = program.Run()
 	return err
 }
 
-func endpointURL(address string) string {
+func resolveTUIEndpoints(getenv func(string) string) (tuiEndpoints, error) {
+	proxyAddress := strings.TrimSpace(getenv("PROXYGO_PROXY_ADDR"))
+	if proxyAddress == "" {
+		proxyAddress = strings.TrimSpace(getenv("PROXY_ADDR"))
+	}
+	if proxyAddress == "" {
+		proxyAddress = "127.0.0.1:8080"
+	}
+	dashboardAddress := strings.TrimSpace(getenv("PROXYGO_DASH_ADDR"))
+	if dashboardAddress == "" {
+		dashboardAddress = "127.0.0.1:8081"
+	}
+	proxyURL, err := normalizeEndpoint(proxyAddress)
+	if err != nil {
+		return tuiEndpoints{}, fmt.Errorf("invalid proxy address: %w", err)
+	}
+	dashboardURL, err := normalizeEndpoint(dashboardAddress)
+	if err != nil {
+		return tuiEndpoints{}, fmt.Errorf("invalid dashboard address: %w", err)
+	}
+	return tuiEndpoints{dashboardURL: dashboardURL, proxyURL: proxyURL}, nil
+}
+
+func normalizeEndpoint(address string) (string, error) {
 	if !strings.Contains(address, "://") {
 		address = "http://" + address
 	}
-	return strings.TrimRight(address, "/")
+	parsed, err := url.Parse(address)
+	if err != nil {
+		return "", err
+	}
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("use http://host:port or https://host:port without credentials or path")
+	}
+	parsed.Path = ""
+	return strings.TrimRight(parsed.String(), "/"), nil
 }
 
 func (m tuiModel) Init() tea.Cmd {
@@ -375,24 +407,17 @@ func (m tuiModel) runReaction(number int) tea.Cmd {
 			return tuiTestMsg{number: number, err: errors.New("prueba inexistente")}
 		}
 		testCase := tuiTestCases[number-1]
-		transport := &http.Transport{Proxy: http.ProxyURL(mustURL(m.proxyURL))}
+		var tlsConfig *tls.Config
 		if testCase.tls {
-			roots, err := x509.SystemCertPool()
-			if err != nil || roots == nil {
-				roots = x509.NewCertPool()
-			}
-			caDir := strings.TrimSpace(os.Getenv("PROXYGO_CA_DIR"))
-			if caDir == "" {
-				caDir = defaultCADir
-			}
-			certificate, err := os.ReadFile(filepath.Join(caDir, "ca.crt"))
+			roots, err := configuredReactionCAPool()
 			if err != nil {
-				return tuiTestMsg{number: number, err: fmt.Errorf("no se pudo leer ca.crt para la prueba 5: %w", err)}
+				return tuiTestMsg{number: number, err: err}
 			}
-			if !roots.AppendCertsFromPEM(certificate) {
-				return tuiTestMsg{number: number, err: errors.New("ca.crt no contiene un certificado válido")}
-			}
-			transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+			tlsConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+		}
+		transport, err := newReactionTransport(m.proxyURL, tlsConfig)
+		if err != nil {
+			return tuiTestMsg{number: number, err: err}
 		}
 		client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 		defer transport.CloseIdleConnections()
@@ -417,12 +442,35 @@ func (m tuiModel) runReaction(number int) tea.Cmd {
 	}
 }
 
-func mustURL(value string) *url.URL {
-	parsed, err := url.Parse(value)
+func newReactionTransport(proxyAddress string, tlsConfig *tls.Config) (*http.Transport, error) {
+	normalized, err := normalizeEndpoint(proxyAddress)
 	if err != nil {
-		return &url.URL{Scheme: "http", Host: "127.0.0.1:8080"}
+		return nil, fmt.Errorf("dirección del proxy inválida; revisa PROXYGO_PROXY_ADDR o PROXY_ADDR: %w", err)
 	}
-	return parsed
+	proxyURL, err := url.Parse(normalized)
+	if err != nil {
+		return nil, fmt.Errorf("parse proxy address: %w", err)
+	}
+	return &http.Transport{Proxy: http.ProxyURL(proxyURL), TLSClientConfig: tlsConfig}, nil
+}
+
+func configuredReactionCAPool() (*x509.CertPool, error) {
+	caDir := strings.TrimSpace(os.Getenv("PROXYGO_CA_DIR"))
+	if caDir == "" {
+		caDir = defaultCADir
+	}
+	certificate, err := os.ReadFile(filepath.Join(caDir, "ca.crt"))
+	if err != nil {
+		return nil, fmt.Errorf("no se pudo leer ca.crt para la prueba 5: %w", err)
+	}
+	roots, err := x509.SystemCertPool()
+	if err != nil || roots == nil {
+		roots = x509.NewCertPool()
+	}
+	if !roots.AppendCertsFromPEM(certificate) {
+		return nil, errors.New("ca.crt no contiene un certificado válido")
+	}
+	return roots, nil
 }
 
 func (m tuiModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -844,6 +892,8 @@ func (m tuiModel) renderOverlay() string {
 		}
 	case "tests":
 		title = "PRUEBAS DE REACCIÓN · test_de_reaccion.md"
+		content.WriteString("Proxy efectivo: " + m.proxyURL + "\n")
+		content.WriteString("Dashboard/API/SSE: " + m.dashboardURL + "\n\n")
 		for index, testCase := range tuiTestCases {
 			content.WriteString(fmt.Sprintf(" %d  %s\n", index+1, testCase.name))
 		}

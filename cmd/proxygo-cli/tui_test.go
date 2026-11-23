@@ -2,6 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -58,6 +68,119 @@ func TestTUIOverlayNavigationAndDetails(t *testing.T) {
 	}
 	if _, ok := quit().(tea.QuitMsg); !ok {
 		t.Fatal("main-view Escape did not return tea.QuitMsg")
+	}
+}
+
+func TestResolveTUIEndpointsUsesConfiguredAddresses(t *testing.T) {
+	values := map[string]string{
+		"PROXYGO_PROXY_ADDR": "http://127.0.0.1:8088/",
+		"PROXY_ADDR":         "127.0.0.1:8090",
+		"PROXYGO_DASH_ADDR":  "127.0.0.1:8089",
+	}
+	endpoints, err := resolveTUIEndpoints(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if endpoints.proxyURL != "http://127.0.0.1:8088" {
+		t.Fatalf("proxy URL = %q, want configured PROXYGO_PROXY_ADDR", endpoints.proxyURL)
+	}
+	if endpoints.dashboardURL != "http://127.0.0.1:8089" {
+		t.Fatalf("dashboard URL = %q, want configured PROXYGO_DASH_ADDR", endpoints.dashboardURL)
+	}
+
+	transport, err := newReactionTransport(endpoints.proxyURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.CloseIdleConnections()
+	request, err := http.NewRequest(http.MethodPost, "http://httpbin.org/post", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyURL, err := transport.Proxy(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxyURL.Host != "127.0.0.1:8088" {
+		t.Fatalf("reaction transport proxy = %q, want 127.0.0.1:8088", proxyURL.Host)
+	}
+}
+
+func TestResolveTUIEndpointsAliasAndFallback(t *testing.T) {
+	t.Run("PROXY_ADDR alias with no scheme", func(t *testing.T) {
+		values := map[string]string{"PROXY_ADDR": "127.0.0.1:8092"}
+		endpoints, err := resolveTUIEndpoints(func(key string) string { return values[key] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if endpoints.proxyURL != "http://127.0.0.1:8092" {
+			t.Fatalf("proxy URL = %q, want normalized alias", endpoints.proxyURL)
+		}
+	})
+
+	t.Run("default addresses", func(t *testing.T) {
+		endpoints, err := resolveTUIEndpoints(func(string) string { return "" })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if endpoints.proxyURL != "http://127.0.0.1:8080" {
+			t.Fatalf("proxy fallback = %q, want http://127.0.0.1:8080", endpoints.proxyURL)
+		}
+		if endpoints.dashboardURL != "http://127.0.0.1:8081" {
+			t.Fatalf("dashboard fallback = %q, want http://127.0.0.1:8081", endpoints.dashboardURL)
+		}
+	})
+
+	t.Run("invalid address does not silently fallback", func(t *testing.T) {
+		_, err := resolveTUIEndpoints(func(key string) string {
+			if key == "PROXYGO_PROXY_ADDR" {
+				return "file:///tmp/proxy"
+			}
+			return ""
+		})
+		if err == nil {
+			t.Fatal("unsupported proxy scheme was silently accepted")
+		}
+	})
+}
+
+func TestConfiguredReactionCAPoolUsesConfiguredDirectory(t *testing.T) {
+	caDir := t.TempDir()
+	t.Setenv("PROXYGO_CA_DIR", caDir)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{Organization: []string{"ProxyGo TUI Test"}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(filepath.Join(caDir, "ca.crt"), certificate, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := configuredReactionCAPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, subject := range pool.Subjects() {
+		if strings.Contains(string(subject), "ProxyGo TUI Test") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("configured ca.crt was not added to the HTTPS test trust pool")
 	}
 }
 
