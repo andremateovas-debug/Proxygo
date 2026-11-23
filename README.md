@@ -114,6 +114,83 @@ curl -x http://127.0.0.1:8080 -X POST http://httpbin.org/post \
 
 Accede al panel de monitoreo en tiempo real desde tu navegador en: **`http://127.0.0.1:8081`**
 
+### Seguridad de la administración
+
+El panel escucha por defecto solo en `127.0.0.1:8081`. En el primer inicio,
+ProxyGo genera un token aleatorio de 256 bits y lo guarda en
+`/var/lib/proxygo/admin.token` con permisos `0600`; conserva únicamente su hash
+SHA-256 en memoria y nunca lo devuelve por HTTP ni lo escribe en logs. Al usar
+por primera vez los controles de modo o CA, el dashboard solicita el token y lo
+mantiene solo en memoria hasta cerrar o recargar la página. La TUI lo lee del
+mismo archivo si el usuario tiene permiso.
+
+Para recuperar el token generado en una instalación con `systemd`:
+
+```bash
+sudo cat /var/lib/proxygo/admin.token
+```
+
+También puedes proporcionar un token propio de al menos 32 caracteres mediante
+`PROXYGO_ADMIN_TOKEN`, o elegir un archivo privado con
+`PROXYGO_ADMIN_TOKEN_FILE`. El valor del entorno prevalece sobre el archivo.
+Para un token de entorno, usa un archivo de entorno de `systemd` protegido en
+lugar de incluir el secreto directamente en la unidad:
+
+```bash
+sudo install -d -m 0700 /etc/proxygo
+sudo sh -c 'umask 077; printf "PROXYGO_ADMIN_TOKEN=%s\n" "$(openssl rand -base64 48)" > /etc/proxygo/admin.env'
+sudo systemctl edit proxygo-proxy.service
+```
+
+Añade al *override*:
+
+```ini
+[Service]
+EnvironmentFile=/etc/proxygo/admin.env
+```
+
+Para usar un archivo de token explícito, crea uno privado y configura
+`PROXYGO_ADMIN_TOKEN_FILE` en el mismo *override*. Esta declaración explícita
+es obligatoria si `PROXYGO_DASH_ADDR` escucha fuera de loopback:
+
+```bash
+sudo install -d -o proxygo -g proxygo -m 0700 /var/lib/proxygo
+sudo -u proxygo sh -c 'umask 077; openssl rand -base64 48 > /var/lib/proxygo/admin.token'
+```
+
+```ini
+[Service]
+Environment="PROXYGO_ADMIN_TOKEN_FILE=/var/lib/proxygo/admin.token"
+```
+
+Aplica los cambios con `sudo systemctl daemon-reload` y reinicia el servicio.
+El token se transmite por HTTP al navegador, por lo que un bind remoto requiere
+un canal de red confiable/cifrado; el mecanismo recomendado sigue siendo el
+loopback predeterminado con túnel SSH.
+
+Las operaciones `POST /api/mode` y `POST /api/ca` exigen
+`Authorization: Bearer <token>` y un encabezado `Origin` del mismo origen; los
+orígenes cruzados y encabezados de autorización duplicados se rechazan. La TUI
+lee el token de `PROXYGO_ADMIN_TOKEN` o del archivo configurado. No se requiere
+token para consultar el estado, y las vistas de cabeceras ocultan valores de
+autorización, cookies, claves API, tokens y secretos.
+
+Si el servicio usa `PROXYGO_ADMIN_TOKEN` desde `/etc/proxygo/admin.env`, inicia
+la TUI cargando ese mismo archivo, por ejemplo:
+
+```bash
+sudo bash -c 'set -a; . /etc/proxygo/admin.env; exec proxygo-cli tui'
+```
+
+Si configuraste `PROXYGO_ADMIN_TOKEN_FILE`, pasa también esa variable al
+proceso `proxygo-cli tui`.
+
+Si configuras `PROXYGO_DASH_ADDR` en una interfaz no loopback, debes declarar
+explícitamente `PROXYGO_ADMIN_TOKEN` o `PROXYGO_ADMIN_TOKEN_FILE`; de lo
+contrario, ProxyGo no inicia. El panel usa HTTP sin cifrado: mantén el bind en
+loopback y usa un túnel SSH para administración remota. No expongas directamente
+el puerto del dashboard a redes no confiables.
+
 ---
 
 ## HTTPS MITM (opcional)

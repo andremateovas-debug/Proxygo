@@ -15,6 +15,7 @@
 	let chart = null;
 	let eventSource = null;
 	let toastTimer = 0;
+	let adminToken = "";
 
 	const elements = {
 		status: document.getElementById("streamStatus"),
@@ -87,6 +88,25 @@
 		elements.toast.classList.add("visible");
 		window.clearTimeout(toastTimer);
 		toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 3200);
+	}
+
+	function requestAdminToken() {
+		if (adminToken) return adminToken;
+		const token = window.prompt("Token de administrador");
+		if (!token) throw new Error("Se requiere el token de administrador");
+		adminToken = token;
+		return adminToken;
+	}
+
+	async function readAdminResponse(response, fallbackMessage) {
+		const payload = await response.json().catch(() => ({}));
+		if (response.status === 401) {
+			adminToken = "";
+			throw new Error("Token de administrador no válido");
+		}
+		if (response.status === 403) throw new Error("Origen no autorizado para esta operación");
+		if (!response.ok) throw new Error(payload.error || fallbackMessage);
+		return payload;
 	}
 
 	function setStreamState(state, label) {
@@ -383,11 +403,14 @@
 		try {
 			const response = await fetch("/api/ca", {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Accept: "application/json" },
+				headers: {
+					"Content-Type": "application/json",
+					Accept: "application/json",
+					Authorization: `Bearer ${requestAdminToken()}`
+				},
 				body: JSON.stringify({ enabled })
 			});
-			const payload = await response.json();
-			if (!response.ok) throw new Error(payload.error || "No se pudo cambiar el estado de MITM");
+			const payload = await readAdminResponse(response, "No se pudo cambiar el estado de MITM");
 			updateCA(payload);
 			showToast(`MITM ${payload.ca_enabled ? "activado" : "desactivado"}`);
 		} catch (error) {
@@ -401,11 +424,14 @@
 		try {
 			const response = await fetch("/api/mode", {
 				method: "POST",
-				headers: { "Content-Type": "application/json", Accept: "application/json" },
+				headers: {
+					"Content-Type": "application/json",
+					Accept: "application/json",
+					Authorization: `Bearer ${requestAdminToken()}`
+				},
 				body: JSON.stringify({ mode })
 			});
-			const payload = await response.json();
-			if (!response.ok) throw new Error(payload.error || "No se pudo cambiar el modo");
+			const payload = await readAdminResponse(response, "No se pudo cambiar el modo");
 			elements.activeMode.textContent = payload.mode;
 			showToast(`Modo actualizado: ${payload.mode}`);
 		} catch (error) {

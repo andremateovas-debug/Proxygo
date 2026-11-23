@@ -12,6 +12,11 @@ SOCK_PATH="/tmp/proxygo-audit.sock"
 PROXY_PORT=18080
 DASH_PORT=18081
 MOCK_PORT=18082
+ADMIN_TOKEN="$(openssl rand -hex 32)"
+ADMIN_CURL_CONFIG="$(mktemp)"
+chmod 600 "$ADMIN_CURL_CONFIG"
+printf 'header = "Origin: http://127.0.0.1:%s"\nheader = "Authorization: Bearer %s"\n' \
+    "$DASH_PORT" "$ADMIN_TOKEN" > "$ADMIN_CURL_CONFIG"
 
 echo -e "${CYAN}=====================================================${NC}"
 echo -e "${CYAN}       AUDITORÍA TÉCNICA INTEGRAL - PROXYGO          ${NC}"
@@ -22,6 +27,7 @@ cleanup() {
     echo -e "\n${YELLOW}[CLEANUP] Deteniendo procesos de prueba...${NC}"
     kill ${RUST_PID:-} ${GO_PID:-} ${MOCK_PID:-} 2>/dev/null || true
     rm -f "$SOCK_PATH"
+    rm -f "$ADMIN_CURL_CONFIG"
 }
 trap cleanup EXIT
 
@@ -85,7 +91,8 @@ fi
 
 # Compilar con Race Detector (-race) y levantar Go Proxy
 go build -race -o /tmp/proxygo-bin ./cmd/proxygo
-PROXYGO_SOCK_PATH="$SOCK_PATH" PROXYGO_PROXY_ADDR=":$PROXY_PORT" PROXYGO_DASH_ADDR=":$DASH_PORT" /tmp/proxygo-bin &
+PROXYGO_SOCK_PATH="$SOCK_PATH" PROXYGO_PROXY_ADDR=":$PROXY_PORT" PROXYGO_DASH_ADDR=":$DASH_PORT" \
+    PROXYGO_ADMIN_TOKEN="$ADMIN_TOKEN" /tmp/proxygo-bin &
 GO_PID=$!
 sleep 1
 
@@ -95,7 +102,8 @@ sleep 1
 echo -e "\n${CYAN}[3/5] Pruebas de Evasión y Sanitización DLP...${NC}"
 
 # Cambiar modo a SANITIZE vía API
-curl -s -X POST "http://127.0.0.1:$DASH_PORT/api/mode" -d '{"mode":"SANITIZE"}' > /dev/null
+curl -s --config "$ADMIN_CURL_CONFIG" -X POST "http://127.0.0.1:$DASH_PORT/api/mode" \
+    -H "Content-Type: application/json" -d '{"mode":"SANITIZE"}' > /dev/null
 
 # Test A: Inyección estándar de API Key
 RESPONSE=$(curl -s -x "http://127.0.0.1:$PROXY_PORT" -X POST "http://127.0.0.1:$MOCK_PORT/v1/messages" \

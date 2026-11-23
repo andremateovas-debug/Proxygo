@@ -284,6 +284,16 @@ func run() error {
 	}
 	proxyAddr := configuredAddr("PROXYGO_PROXY_ADDR", "127.0.0.1:8080")
 	dashAddr := configuredAddr("PROXYGO_DASH_ADDR", "127.0.0.1:8081")
+	adminAuth, err := loadAdminAuthenticator()
+	if err != nil {
+		return err
+	}
+	if err := validateDashboardAddress(dashAddr, adminAuth); err != nil {
+		return err
+	}
+	if loopback, _ := dashboardAddressIsLoopback(dashAddr); !loopback {
+		log.Printf("WARNING: dashboard is listening on non-loopback HTTP address %s; restrict network access and use a trusted encrypted channel", dashAddr)
+	}
 
 	events := newEventHub()
 	engine := newUDSClient(socketPath, policy, log.Default())
@@ -316,7 +326,7 @@ func run() error {
 	mitm := newMITMController(core, connect, log.Default(), events)
 	core.mitm = mitm
 	proxy := newHTTPProxy(core, connect, proxyAddr)
-	internal := newInternalServer(events, modes, dashAddr, mitm)
+	internal := newInternalServer(events, modes, dashAddr, adminAuth, mitm)
 	servers := []*http.Server{proxy, internal}
 	serveErrors := make(chan error, len(servers))
 	for _, server := range servers {
@@ -1041,13 +1051,28 @@ func headerMap(h http.Header) map[string]string {
 func sanitizeHeaderPreview(headers map[string]string) map[string]string {
 	preview := make(map[string]string)
 	for k, v := range headers {
-		if len(v) > 128 {
+		if sensitiveHeaderName(k) {
+			preview[k] = "[REDACTED]"
+		} else if len(v) > 128 {
 			preview[k] = v[:128] + "..."
 		} else {
 			preview[k] = v
 		}
 	}
 	return preview
+}
+
+func sensitiveHeaderName(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	if lower == "authorization" || lower == "proxy-authorization" || lower == "cookie" || lower == "set-cookie" {
+		return true
+	}
+	for _, marker := range []string{"auth", "key", "token", "secret", "credential", "password", "session", "private"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func eventID() string {
@@ -1096,7 +1121,7 @@ func resetRequestBody(r *http.Request, body []byte) {
 	setRequestBody(r, body)
 }
 
-func newInternalServer(events *eventHub, modes *activeMode, addr string, controllers ...*mitmController) *http.Server {
+func newInternalServer(events *eventHub, modes *activeMode, addr string, adminAuth *adminAuthenticator, controllers ...*mitmController) *http.Server {
 	mux := http.NewServeMux()
 	var mitm *mitmController
 	if len(controllers) > 0 {
@@ -1119,14 +1144,21 @@ func newInternalServer(events *eventHub, modes *activeMode, addr string, control
 	mux.HandleFunc("/api/ca", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		if mitm == nil {
-			http.Error(w, "CA control unavailable", http.StatusServiceUnavailable)
-			return
-		}
 		switch r.Method {
 		case http.MethodGet:
+			if mitm == nil {
+				http.Error(w, "CA control unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(mitm.publicState())
 		case http.MethodPost:
+			if !adminAuth.authorize(w, r) {
+				return
+			}
+			if mitm == nil {
+				http.Error(w, "CA control unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			var request struct {
 				Enabled *bool `json:"enabled"`
 			}
@@ -1139,8 +1171,7 @@ func newInternalServer(events *eventHub, modes *activeMode, addr string, control
 			}
 			state, err := mitm.setEnabled(*request.Enabled)
 			if err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				http.Error(w, "internal server error", http.StatusInternalServerError)
 				return
 			}
 			_ = json.NewEncoder(w).Encode(state)
@@ -1155,6 +1186,9 @@ func newInternalServer(events *eventHub, modes *activeMode, addr string, control
 		case http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]string{"mode": string(modes.current())})
 		case http.MethodPost:
+			if !adminAuth.authorize(w, r) {
+				return
+			}
 			var request struct {
 				Mode inspectionMode `json:"mode"`
 			}

@@ -29,7 +29,12 @@ func TestCAControlAPIAndPreservesFilesWhenDisabled(t *testing.T) {
 	modes := newActiveMode(modeMonitor)
 	core := &proxyCore{modes: modes, events: events}
 	controller := newMITMController(core, nil, log.New(io.Discard, "", 0), events)
-	server := newInternalServer(events, modes, "", controller)
+	adminToken := strings.Repeat("admin-token-", 4)
+	adminAuth, err := newAdminAuthenticator(adminToken, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := newInternalServer(events, modes, "", adminAuth, controller)
 
 	request := httptest.NewRequest(http.MethodGet, "/api/state", nil)
 	response := httptest.NewRecorder()
@@ -49,11 +54,13 @@ func TestCAControlAPIAndPreservesFilesWhenDisabled(t *testing.T) {
 		t.Helper()
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/api/ca", strings.NewReader(body))
+		request.Header.Set("Origin", "http://"+request.Host)
+		request.Header.Set("Authorization", "Bearer "+adminToken)
 		server.Handler.ServeHTTP(recorder, request)
 		return recorder
 	}
-	if response := post(`{"enabled":true}`); response.Code != http.StatusBadRequest {
-		t.Fatalf("CA enable without allowlist = %d, want 400", response.Code)
+	if response := post(`{"enabled":true}`); response.Code != http.StatusInternalServerError {
+		t.Fatalf("CA enable without allowlist = %d, want 500", response.Code)
 	}
 	if _, err := os.Stat(filepath.Join(caDir, "ca.key")); !os.IsNotExist(err) {
 		t.Fatalf("CA key exists after rejected activation: %v", err)

@@ -24,8 +24,10 @@ import (
 )
 
 const (
-	tuiMaxEvents    = 500
-	tuiRefreshEvery = 5 * time.Second
+	tuiMaxEvents            = 500
+	tuiRefreshEvery         = 5 * time.Second
+	tuiAdminTokenFile       = "/var/lib/proxygo/admin.token"
+	tuiMinimumAdminTokenLen = 32
 )
 
 var (
@@ -89,6 +91,7 @@ type tuiModel struct {
 	proxyClient  *http.Client
 	streamClient *http.Client
 	stream       chan tuiStreamResult
+	adminToken   string
 	mode         string
 	ca           tuiCAState
 	events       []tuiEvent
@@ -165,6 +168,7 @@ func runTUI() error {
 	if err != nil {
 		return err
 	}
+	adminToken, _ := loadTUIAdminToken(os.Getenv)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	model := tuiModel{
@@ -174,6 +178,7 @@ func runTUI() error {
 		proxyClient:  &http.Client{Timeout: 8 * time.Second},
 		streamClient: &http.Client{},
 		stream:       make(chan tuiStreamResult, 32),
+		adminToken:   adminToken,
 		mode:         "MONITOR",
 		filter:       "ALL",
 		status:       "Conectando al dashboard…",
@@ -181,6 +186,38 @@ func runTUI() error {
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = program.Run()
 	return err
+}
+
+func loadTUIAdminToken(getenv func(string) string) (string, error) {
+	if token := getenv("PROXYGO_ADMIN_TOKEN"); token != "" {
+		return token, nil
+	}
+	path := strings.TrimSpace(getenv("PROXYGO_ADMIN_TOKEN_FILE"))
+	if path == "" {
+		path = tuiAdminTokenFile
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", errors.New("administrative token unavailable; configure PROXYGO_ADMIN_TOKEN or a readable token file")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return "", errors.New("administrative token file must be regular and private")
+	}
+	token := strings.TrimSpace(string(data))
+	if len(token) < tuiMinimumAdminTokenLen {
+		return "", errors.New("administrative token is invalid")
+	}
+	return token, nil
+}
+
+func (m tuiModel) setAdminHeaders(request *http.Request) error {
+	if m.adminToken == "" {
+		return errors.New("administrative token unavailable; configure PROXYGO_ADMIN_TOKEN or a readable token file")
+	}
+	request.Header.Set("Authorization", "Bearer "+m.adminToken)
+	request.Header.Set("Origin", m.dashboardURL)
+	return nil
 }
 
 func resolveTUIEndpoints(getenv func(string) string) (tuiEndpoints, error) {
@@ -346,6 +383,9 @@ func (m tuiModel) changeMode(mode string) tea.Cmd {
 			return tuiModeMsg{err: err}
 		}
 		request.Header.Set("Content-Type", "application/json")
+		if err := m.setAdminHeaders(request); err != nil {
+			return tuiModeMsg{err: err}
+		}
 		response, err := m.proxyClient.Do(request)
 		if err != nil {
 			return tuiModeMsg{err: err}
@@ -374,6 +414,9 @@ func (m tuiModel) changeCA(enabled bool) tea.Cmd {
 			return tuiCAMsg{err: err}
 		}
 		request.Header.Set("Content-Type", "application/json")
+		if err := m.setAdminHeaders(request); err != nil {
+			return tuiCAMsg{err: err}
+		}
 		response, err := m.proxyClient.Do(request)
 		if err != nil {
 			return tuiCAMsg{err: err}

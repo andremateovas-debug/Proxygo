@@ -144,6 +144,46 @@ func TestResolveTUIEndpointsAliasAndFallback(t *testing.T) {
 	})
 }
 
+func TestLoadTUIAdminTokenFromEnvironmentOrFile(t *testing.T) {
+	t.Run("environment", func(t *testing.T) {
+		values := map[string]string{"PROXYGO_ADMIN_TOKEN": strings.Repeat("env-token-", 4)}
+		token, err := loadTUIAdminToken(func(key string) string { return values[key] })
+		if err != nil || token != values["PROXYGO_ADMIN_TOKEN"] {
+			t.Fatalf("token = %q, err=%v", token, err)
+		}
+	})
+
+	t.Run("file", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "admin.token")
+		want := strings.Repeat("file-token-", 4)
+		if err := os.WriteFile(path, []byte(want+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		values := map[string]string{"PROXYGO_ADMIN_TOKEN_FILE": path}
+		token, err := loadTUIAdminToken(func(key string) string { return values[key] })
+		if err != nil || token != want {
+			t.Fatalf("token = %q, err=%v", token, err)
+		}
+	})
+}
+
+func TestTUIAdminHeadersIncludeBearerAndOrigin(t *testing.T) {
+	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:8081/api/mode", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := tuiModel{adminToken: strings.Repeat("tui-token-", 4), dashboardURL: "http://127.0.0.1:8081"}
+	if err := model.setAdminHeaders(request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Header.Get("Authorization") != "Bearer "+model.adminToken {
+		t.Fatal("TUI request omitted its bearer token")
+	}
+	if request.Header.Get("Origin") != model.dashboardURL {
+		t.Fatalf("Origin = %q, want %q", request.Header.Get("Origin"), model.dashboardURL)
+	}
+}
+
 func TestConfiguredReactionCAPoolUsesConfiguredDirectory(t *testing.T) {
 	caDir := t.TempDir()
 	t.Setenv("PROXYGO_CA_DIR", caDir)
