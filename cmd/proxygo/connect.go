@@ -169,6 +169,19 @@ func (h *connectHandler) serve(w http.ResponseWriter, r *http.Request) {
 	host, port, err := parseConnectTarget(authority, h.cfg)
 	if err != nil {
 		h.logger.Printf("connect %q: rejected: %v", authority, err)
+	if h.core != nil && h.core.events != nil {
+		h.core.events.publish(inspectionEvent{
+			Timestamp:     time.Now().UTC(),
+			Method:        http.MethodConnect,
+			Host:          authority,
+			Mode:          string(h.core.modes.current()),
+			Status:        "connect_rejected",
+			Protocol:      "HTTPS",
+			Inspected:     false,
+			ConnectionType: "connect",
+			ValidationError: err.Error(),
+		})
+	}
 		status := http.StatusForbidden
 		if errors.Is(err, errConnectBadRequest) {
 			status = http.StatusBadRequest
@@ -182,6 +195,19 @@ func (h *connectHandler) serve(w http.ResponseWriter, r *http.Request) {
 		defer func() { <-h.sem }()
 	default:
 		h.logger.Printf("connect %s: rejected: too many tunnels", authority)
+	if h.core != nil && h.core.events != nil {
+		h.core.events.publish(inspectionEvent{
+			Timestamp:     time.Now().UTC(),
+			Method:        http.MethodConnect,
+			Host:          authority,
+			Mode:          string(h.core.modes.current()),
+			Status:        "connect_rejected",
+			Protocol:      "HTTPS",
+			Inspected:     false,
+			ConnectionType: "connect",
+			ValidationError: "too many tunnels",
+		})
+	}
 		http.Error(w, "too many CONNECT tunnels", http.StatusServiceUnavailable)
 		return
 	}
@@ -195,14 +221,58 @@ func (h *connectHandler) serve(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusForbidden
 		}
 		h.logger.Printf("connect %s: resolve: %v", authority, err)
+	if h.core != nil && h.core.events != nil {
+		h.core.events.publish(inspectionEvent{
+			Timestamp:     time.Now().UTC(),
+			Method:        http.MethodConnect,
+			Host:          host,
+			Mode:          string(h.core.modes.current()),
+			Status:        "connect_rejected",
+			Protocol:      "HTTPS",
+			Inspected:     false,
+			ConnectionType: "connect",
+			ValidationError: err.Error(),
+		})
+	}
 		http.Error(w, "CONNECT destination rejected", status)
 		return
 	}
 	cert, err := h.ca.certificateForHost(host)
 	if err != nil {
 		h.logger.Printf("connect %s: certificate: %v", authority, err)
+	if h.core != nil && h.core.events != nil {
+		h.core.events.publish(inspectionEvent{
+			Timestamp:     time.Now().UTC(),
+			Method:        http.MethodConnect,
+			Host:          host,
+			Mode:          string(h.core.modes.current()),
+			Status:        "validation_error",
+			Protocol:      "HTTPS",
+			Inspected:     false,
+			ConnectionType: "connect",
+			ValidationError: err.Error(),
+		})
+	}
+		if h.core != nil && h.core.securityPolicy == BlockUninspected {
+			http.Error(w, "cannot issue certificate", http.StatusForbidden)
+			return
+		}
 		http.Error(w, "cannot issue certificate", http.StatusInternalServerError)
 		return
+	}
+
+	if h.core != nil && h.core.events != nil {
+		h.core.events.publish(inspectionEvent{
+			Timestamp:     time.Now().UTC(),
+			Method:        http.MethodConnect,
+			Host:          host,
+			Mode:          string(h.core.modes.current()),
+			Status:        "cert_generated",
+			Protocol:      "HTTPS",
+			Inspected:     false,
+			ConnectionType: "connect",
+			CertGenerated: true,
+		})
 	}
 
 	hijacker, ok := w.(http.Hijacker)
@@ -249,10 +319,36 @@ func (h *connectHandler) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		h.logger.Printf("connect %s: TLS handshake: %v", authority, err)
+	if h.core != nil && h.core.events != nil {
+		h.core.events.publish(inspectionEvent{
+			Timestamp:     time.Now().UTC(),
+			Method:        http.MethodConnect,
+			Host:          host,
+			Mode:          string(h.core.modes.current()),
+			Status:        "tls_error",
+			Protocol:      "HTTPS",
+			Inspected:     false,
+			ConnectionType: "connect",
+			TLSError:      err.Error(),
+		})
+	}
 		return
 	}
 	_ = tlsConn.SetDeadline(time.Time{})
 	h.logger.Printf("connect %s: TLS established", authority)
+
+	if h.core != nil && h.core.events != nil {
+		h.core.events.publish(inspectionEvent{
+			Timestamp:     time.Now().UTC(),
+			Method:        http.MethodConnect,
+			Host:          host,
+			Mode:          string(h.core.modes.current()),
+			Status:        "tls_established",
+			Protocol:      "HTTPS",
+			Inspected:     true,
+			ConnectionType: "connect",
+		})
+	}
 
 	transport := h.newTransport(host, port, addresses)
 	defer transport.CloseIdleConnections()

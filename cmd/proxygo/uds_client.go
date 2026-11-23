@@ -60,15 +60,20 @@ type InspectionResponse struct {
 type udsClient struct {
 	socketPath string
 	policy     FailurePolicy
+	timeout    time.Duration
 	logger     *log.Logger
 	sequence   atomic.Uint64
 }
 
 func newUDSClient(socketPath string, policy FailurePolicy, logger *log.Logger) *udsClient {
+	return newUDSClientWithTimeout(socketPath, policy, engineTimeout, logger)
+}
+
+func newUDSClientWithTimeout(socketPath string, policy FailurePolicy, timeout time.Duration, logger *log.Logger) *udsClient {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &udsClient{socketPath: socketPath, policy: policy, logger: logger}
+	return &udsClient{socketPath: socketPath, policy: policy, timeout: timeout, logger: logger}
 }
 
 // Inspect sends one NDJSON request over a dedicated Unix socket connection.
@@ -90,10 +95,10 @@ func (c *udsClient) Inspect(ctx context.Context, request InspectionRequest) (*In
 }
 
 func (c *udsClient) roundTrip(parent context.Context, request InspectionRequest) (*InspectionResponse, error) {
-	ctx, cancel := context.WithTimeout(parent, engineTimeout)
+	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 
-	dialer := net.Dialer{Timeout: engineTimeout}
+	dialer := net.Dialer{Timeout: c.timeout}
 	conn, err := dialer.DialContext(ctx, "unix", c.socketPath)
 	if err != nil {
 		return nil, err
