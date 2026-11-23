@@ -359,7 +359,12 @@
 
 	async function loadState() {
 		try {
-			const response = await fetch("/api/state", { headers: { Accept: "application/json" }, cache: "no-store" });
+			const options = { headers: { Accept: "application/json" }, cache: "no-store" };
+			let response = await fetch("/api/state", options);
+			if (response.status === 401) {
+				options.headers.Authorization = `Bearer ${requestAdminToken()}`;
+				response = await fetch("/api/state", options);
+			}
 			if (!response.ok) throw new Error("No se pudo cargar el estado del servidor");
 			const state = await response.json();
 			updateCA(state);
@@ -487,6 +492,5 @@
 		updateMetrics();
 		refreshChart();
 	}, 5000);
-	loadState();
-	connectEvents();
+	loadState().finally(connectEvents);
 })();

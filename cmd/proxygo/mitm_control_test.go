@@ -34,7 +34,7 @@ func TestCAControlAPIAndPreservesFilesWhenDisabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := newInternalServer(events, modes, "", adminAuth, controller)
+	server := newInternalServer(events, modes, "127.0.0.1:8081", adminAuth, controller)
 
 	request := httptest.NewRequest(http.MethodGet, "/api/state", nil)
 	response := httptest.NewRecorder()

@@ -146,6 +146,30 @@ func TestResolvePublicRejectsPrivateDNSAnswers(t *testing.T) {
 	}
 }
 
+func TestPrivateNetworkResolutionPolicy(t *testing.T) {
+	privateAddress := netip.MustParseAddr("192.168.10.20")
+	lookup := func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{privateAddress}, nil
+	}
+	if _, err := resolvePublicWithPolicy(context.Background(), "origin.proxygo.test", lookup, true); !errors.Is(err, errBlockedAddress) {
+		t.Fatalf("private address with blocking enabled: error = %v, want blocked-address error", err)
+	}
+	if addresses, err := resolvePublicWithPolicy(context.Background(), "origin.proxygo.test", lookup, false); err != nil || len(addresses) != 1 || addresses[0] != privateAddress {
+		t.Fatalf("private address with blocking disabled: addresses=%v error=%v", addresses, err)
+	}
+	for _, blockPrivateNetwork := range []bool{true, false} {
+		core := &proxyCore{blockPrivateNetwork: blockPrivateNetwork}
+		handler := newConnectHandler(nil, core, connectConfig{maxTunnels: 1}, nil)
+		_, err := handler.resolve(context.Background(), privateAddress.String())
+		if blockPrivateNetwork && !errors.Is(err, errBlockedAddress) {
+			t.Errorf("core policy true returned %v, want blocked-address error", err)
+		}
+		if !blockPrivateNetwork && err != nil {
+			t.Errorf("core policy false rejected private destination: %v", err)
+		}
+	}
+}
+
 func TestConnectHandlerRejectsBadTargets(t *testing.T) {
 	cfg := connectConfig{
 		ports:        map[int]struct{}{443: {}},

@@ -53,12 +53,21 @@ func startFakeEngine(t *testing.T) string {
 						body = strings.ReplaceAll(body, "SECRET", "[REDACTED]")
 						findings = append(findings, Finding{Kind: "TEST_SECRET", Path: "$"})
 					}
+					sanitizedHeaders := make(map[string]string, len(req.Headers))
+					for key, value := range req.Headers {
+						sanitized := strings.ReplaceAll(value, "sk-ant-api03-abcdefghijklmnopqrstuvwx", "[REDACTED_ANTHROPIC_KEY]")
+						sanitizedHeaders[key] = sanitized
+						if sanitized != value {
+							findings = append(findings, Finding{Kind: "ANTHROPIC_KEY", Path: "header." + strings.ToLower(key)})
+						}
+					}
 					response := InspectionResponse{
-						ID:            req.ID,
-						Category:      "GENERIC_JSON",
-						RiskLevel:     "LOW",
-						Findings:      findings,
-						SanitizedBody: body,
+						ID:               req.ID,
+						Category:         "GENERIC_JSON",
+						RiskLevel:        "LOW",
+						Findings:         findings,
+						SanitizedBody:    body,
+						SanitizedHeaders: sanitizedHeaders,
 					}
 					data, err := json.Marshal(response)
 					if err != nil {

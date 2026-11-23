@@ -156,7 +156,15 @@ func newConnectHandler(ca *certAuthority, core *proxyCore, cfg connectConfig, lo
 	}
 	resolve := cfg.resolve
 	if resolve == nil {
-		resolve = resolvePublic
+		resolve = func(ctx context.Context, host string) ([]netip.Addr, error) {
+			blockPrivateNetwork := true
+			if core != nil {
+				blockPrivateNetwork = core.blockPrivateNetwork
+			}
+			return resolvePublicWithPolicy(ctx, host, func(ctx context.Context, host string) ([]netip.Addr, error) {
+				return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+			}, blockPrivateNetwork)
+		}
 	}
 	return &connectHandler{
 		ca:      ca,
@@ -528,15 +536,19 @@ func hostAllowed(host string, allowed []string) bool {
 }
 
 func resolvePublic(ctx context.Context, host string) ([]netip.Addr, error) {
-	return resolvePublicWithLookup(ctx, host, func(ctx context.Context, host string) ([]netip.Addr, error) {
+	return resolvePublicWithPolicy(ctx, host, func(ctx context.Context, host string) ([]netip.Addr, error) {
 		return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-	})
+	}, true)
 }
 
 func resolvePublicWithLookup(ctx context.Context, host string, lookup func(context.Context, string) ([]netip.Addr, error)) ([]netip.Addr, error) {
+	return resolvePublicWithPolicy(ctx, host, lookup, true)
+}
+
+func resolvePublicWithPolicy(ctx context.Context, host string, lookup func(context.Context, string) ([]netip.Addr, error), blockPrivateNetwork bool) ([]netip.Addr, error) {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		addr = addr.Unmap()
-		if !isPublicAddr(addr) {
+		if !isAllowedDestination(addr, blockPrivateNetwork) {
 			return nil, fmt.Errorf("%w: %s", errBlockedAddress, addr)
 		}
 		return []netip.Addr{addr}, nil
@@ -551,7 +563,7 @@ func resolvePublicWithLookup(ctx context.Context, host string, lookup func(conte
 	public := make([]netip.Addr, 0, len(addresses))
 	for _, addr := range addresses {
 		addr = addr.Unmap()
-		if !isPublicAddr(addr) {
+		if !isAllowedDestination(addr, blockPrivateNetwork) {
 			return nil, fmt.Errorf("%w: %s", errBlockedAddress, addr)
 		}
 		public = append(public, addr)
@@ -560,15 +572,26 @@ func resolvePublicWithLookup(ctx context.Context, host string, lookup func(conte
 }
 
 func isPublicAddr(addr netip.Addr) bool {
+	return isAllowedDestination(addr, true)
+}
+
+func isAllowedDestination(addr netip.Addr, blockPrivateNetwork bool) bool {
 	if !addr.IsValid() {
 		return false
 	}
 	addr = addr.Unmap()
-	if addr.IsUnspecified() || addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() || addr.IsMulticast() {
+	if addr.IsUnspecified() || addr.IsMulticast() {
+		return false
+	}
+	privateOrLocal := addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
+	if blockPrivateNetwork && privateOrLocal {
 		return false
 	}
 	for _, prefix := range blockedPrefixes {
 		if prefix.Contains(addr) {
+			if !blockPrivateNetwork && privateOrLocal {
+				continue
+			}
 			return false
 		}
 	}

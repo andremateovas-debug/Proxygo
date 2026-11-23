@@ -168,19 +168,23 @@ func TestLoadTUIAdminTokenFromEnvironmentOrFile(t *testing.T) {
 }
 
 func TestTUIAdminHeadersIncludeBearerAndOrigin(t *testing.T) {
-	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:8081/api/mode", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	model := tuiModel{adminToken: strings.Repeat("tui-token-", 4), dashboardURL: "http://127.0.0.1:8081"}
-	if err := model.setAdminHeaders(request); err != nil {
-		t.Fatal(err)
-	}
-	if request.Header.Get("Authorization") != "Bearer "+model.adminToken {
-		t.Fatal("TUI request omitted its bearer token")
-	}
-	if request.Header.Get("Origin") != model.dashboardURL {
-		t.Fatalf("Origin = %q, want %q", request.Header.Get("Origin"), model.dashboardURL)
+	for _, target := range []string{"/api/state", "/events", "/api/mode"} {
+		t.Run(target, func(t *testing.T) {
+			request, err := http.NewRequest(http.MethodGet, model.dashboardURL+target, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := model.setAdminHeaders(request); err != nil {
+				t.Fatal(err)
+			}
+			if request.Header.Get("Authorization") != "Bearer "+model.adminToken {
+				t.Fatal("TUI request omitted its bearer token")
+			}
+			if request.Header.Get("Origin") != model.dashboardURL {
+				t.Fatalf("Origin = %q, want %q", request.Header.Get("Origin"), model.dashboardURL)
+			}
+		})
 	}
 }
 

@@ -141,13 +141,27 @@ func (a *adminAuthenticator) authorize(w http.ResponseWriter, r *http.Request) b
 		return false
 	}
 	authorization := r.Header.Values("Authorization")
-	if len(authorization) != 1 {
-		w.Header().Set("WWW-Authenticate", `Bearer realm="proxygo-admin"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return false
+	var token string
+	if len(authorization) == 1 {
+		scheme, value, ok := strings.Cut(authorization[0], " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") || value == "" || strings.ContainsAny(value, " \t\r\n") {
+			token = ""
+		} else {
+			token = value
+		}
+	} else if len(authorization) == 0 {
+		cookies := r.Cookies()
+		for _, cookie := range cookies {
+			if cookie.Name == "proxygo_admin" {
+				if token != "" {
+					token = ""
+					break
+				}
+				token = cookie.Value
+			}
+		}
 	}
-	scheme, token, ok := strings.Cut(authorization[0], " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" || strings.ContainsAny(token, " \t\r\n") {
+	if token == "" || len(authorization) > 1 {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="proxygo-admin"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false
@@ -158,11 +172,20 @@ func (a *adminAuthenticator) authorize(w http.ResponseWriter, r *http.Request) b
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return false
 	}
+	if len(authorization) == 1 {
+		http.SetCookie(w, &http.Cookie{Name: "proxygo_admin", Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	}
 	return true
 }
 
 func sameOriginRequest(r *http.Request) bool {
 	origins := r.Header.Values("Origin")
+	if len(origins) == 0 && r.Method == http.MethodGet {
+		fetchSites := r.Header.Values("Sec-Fetch-Site")
+		if len(fetchSites) == 1 && fetchSites[0] == "same-origin" {
+			return true
+		}
+	}
 	if len(origins) != 1 {
 		return false
 	}

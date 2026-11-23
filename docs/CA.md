@@ -27,7 +27,7 @@ Variables de entorno del servicio `proxygo-proxy` para la CA y túneles `CONNECT
 | `PROXYGO_INSPECT_RESPONSES` | `true` / `false` | Activa o desactiva la inspección DLP en el cuerpo de las respuestas entrantes. |
 | `PROXYGO_INSPECT_HEADERS` | `true` / `false` | Activa o desactiva la inspección y sanitización de cabeceras HTTP (por ejemplo, fuga de tokens `Authorization`). |
 | `PROXYGO_BLOCK_INVALID_CERTS` | `true` / `false` | Controla el bloqueo de servidores destino con certificados TLS inválidos o expirados. |
-| `PROXYGO_BLOCK_PRIVATE_NETWORKS` | `true` / `false` | Bloquea destinos en redes privadas, loopback, link-local, multicast y rangos reservados (protección SSRF). |
+| `PROXYGO_BLOCK_PRIVATE_NETWORKS` | `true` / `false` | Por defecto (`true`) bloquea destinos privados, loopback y link-local además de multicast y rangos reservados. `false` permite destinos privados, loopback y link-local en túneles CONNECT; úselo solo en redes de confianza porque permite SSRF hacia servicios internos. Multicast, direcciones no especificadas y rangos reservados siguen bloqueados. |
 | `PROXYGO_MAX_BODY_BYTES` | entero (bytes) | Límite máximo solicitado para inspeccionar cada cuerpo. El motor NDJSON admite hasta 1 MiB por cuerpo; el límite efectivo es el menor entre ambos. |
 
 Los cuerpos que superan el límite se detectan leyendo como máximo un byte
@@ -191,9 +191,10 @@ deben retirar la anterior y confiar en la nueva.
 - Las aplicaciones con certificate pinning rechazarán la intercepción.
 - Solo se intercepta HTTP sobre TLS. Otros protocolos que usan `CONNECT` no
   funcionan.
-- Los destinos privados, loopback, link-local, multicast y rangos reservados
-  están bloqueados por defecto (`PROXYGO_BLOCK_PRIVATE_NETWORKS`). El proxy no
-  es un túnel abierto.
+- Los destinos privados, loopback y link-local están bloqueados por defecto.
+  `PROXYGO_BLOCK_PRIVATE_NETWORKS=false` permite esos destinos y aumenta el
+  riesgo de SSRF hacia servicios internos; multicast, direcciones no
+  especificadas y rangos reservados siguen bloqueados.
 - El comportamiento ante conexiones que no pueden inspeccionarse (pinning, mTLS,
   WebSockets, SSE o fallos del motor) depende de `PROXYGO_SECURITY_POLICY`.
 - No exponga el puerto del proxy a Internet sin autenticación y firewall.

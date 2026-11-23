@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -157,6 +158,97 @@ func TestAdminModeAndCAOperationsRequireAuthorization(t *testing.T) {
 	server.Handler.ServeHTTP(response, badBody)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("malformed mode request = %d, want 400", response.Code)
+	}
+}
+
+func TestDashboardAPIReadAuthorizationByBind(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		address    string
+		readStatus int
+	}{
+		{name: "loopback", address: "127.0.0.1:8081", readStatus: http.StatusOK},
+		{name: "non-loopback", address: "0.0.0.0:8081", readStatus: http.StatusUnauthorized},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			auth := mustAdminAuthenticator(t, testAdminToken, true)
+			modes := newActiveMode(modeMonitor)
+			server := newInternalServer(newEventHub(), modes, test.address, auth)
+			serve := func(method, path, token, origin string) *httptest.ResponseRecorder {
+				t.Helper()
+				request := authorizedAdminRequest(method, "http://admin.example.test"+path, token)
+				if origin != "" {
+					request.Header.Set("Origin", origin)
+				}
+				if path == "/events" {
+					ctx, cancel := context.WithCancel(request.Context())
+					cancel()
+					request = request.WithContext(ctx)
+				}
+				recorder := httptest.NewRecorder()
+				server.Handler.ServeHTTP(recorder, request)
+				return recorder
+			}
+
+			for _, path := range []string{"/api/state", "/events", "/api/ca", "/api/mode"} {
+				wantWithoutToken := test.readStatus
+				if path == "/api/ca" && test.address == "127.0.0.1:8081" {
+					wantWithoutToken = http.StatusServiceUnavailable
+				}
+				if response := serve(http.MethodGet, path, "", "http://admin.example.test"); response.Code != wantWithoutToken {
+					t.Errorf("GET %s without token = %d, want %d", path, response.Code, wantWithoutToken)
+				}
+				wantWithToken := http.StatusOK
+				if path == "/api/ca" {
+					wantWithToken = http.StatusServiceUnavailable
+				}
+				if response := serve(http.MethodGet, path, testAdminToken, "http://admin.example.test"); response.Code != wantWithToken {
+					t.Errorf("GET %s with token = %d, want %d", path, response.Code, wantWithToken)
+				}
+			}
+			if test.address == "0.0.0.0:8081" {
+				stateResponse := serve(http.MethodGet, "/api/state", testAdminToken, "http://admin.example.test")
+				cookies := stateResponse.Result().Cookies()
+				if len(cookies) != 1 || cookies[0].Name != "proxygo_admin" || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
+					t.Fatalf("authenticated state cookie = %#v", cookies)
+				}
+				request := httptest.NewRequest(http.MethodGet, "http://admin.example.test/events", nil)
+				request.Header.Set("Sec-Fetch-Site", "same-origin")
+				request.AddCookie(cookies[0])
+				ctx, cancel := context.WithCancel(request.Context())
+				cancel()
+				request = request.WithContext(ctx)
+				recorder := httptest.NewRecorder()
+				server.Handler.ServeHTTP(recorder, request)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("GET /events with same-origin session cookie = %d, want 200", recorder.Code)
+				}
+			}
+
+			if response := serve(http.MethodPost, "/api/mode", "", "http://admin.example.test"); response.Code != http.StatusUnauthorized {
+				t.Errorf("POST /api/mode without token = %d, want 401", response.Code)
+			}
+			if response := serve(http.MethodPost, "/api/mode", testAdminToken, "http://admin.example.test"); response.Code != http.StatusOK {
+				t.Errorf("POST /api/mode with token = %d, want 200", response.Code)
+			}
+			wantOriginStatus := http.StatusForbidden
+			if test.address == "127.0.0.1:8081" {
+				wantOriginStatus = http.StatusOK
+			}
+			if response := serve(http.MethodGet, "/api/state", testAdminToken, "https://attacker.example"); response.Code != wantOriginStatus {
+				t.Errorf("GET /api/state with untrusted Origin = %d, want %d", response.Code, wantOriginStatus)
+			}
+			if test.address == "0.0.0.0:8081" {
+				request := httptest.NewRequest(http.MethodGet, "http://admin.example.test/api/state", nil)
+				request.Header.Set("Sec-Fetch-Site", "cross-site")
+				request.Header.Set("Authorization", "Bearer "+testAdminToken)
+				recorder := httptest.NewRecorder()
+				server.Handler.ServeHTTP(recorder, request)
+				if recorder.Code != http.StatusForbidden {
+					t.Errorf("GET /api/state with cross-site fetch metadata = %d, want 403", recorder.Code)
+				}
+			}
+		})
 	}
 }
 

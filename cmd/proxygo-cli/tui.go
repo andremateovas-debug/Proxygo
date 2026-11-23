@@ -275,6 +275,9 @@ func (m tuiModel) fetchState() tea.Cmd {
 			return tuiStateMsg{err: err}
 		}
 		request.Header.Set("Accept", "application/json")
+		if err := m.setAdminHeaders(request); err != nil {
+			return tuiStateMsg{err: err}
+		}
 		response, err := m.proxyClient.Do(request)
 		if err != nil {
 			return tuiStateMsg{err: err}
@@ -298,6 +301,9 @@ func (m tuiModel) connectSSE() tea.Cmd {
 			return tuiStreamResult{err: err}
 		}
 		request.Header.Set("Accept", "text/event-stream")
+		if err := m.setAdminHeaders(request); err != nil {
+			return tuiStreamResult{err: err}
+		}
 		response, err := m.streamClient.Do(request)
 		if err != nil {
 			return tuiStreamResult{err: err}

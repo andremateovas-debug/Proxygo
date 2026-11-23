@@ -564,6 +564,9 @@ func newHTTPProxy(core *proxyCore, connect *connectHandler, addr string) *http.S
 			target := *request.In.URL
 			request.SetURL(&target)
 		},
+		ModifyResponse: func(response *http.Response) error {
+			return core.inspectResponse(response, response.Request.URL.Hostname())
+		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			log.Printf("upstream proxy error: %v", err)
 			http.Error(w, "upstream unavailable", http.StatusBadGateway)
@@ -739,7 +742,8 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 		return true
 	}
 
-	headerFindings, sanitizedHeaders := p.inspectHeadersFromMap(headers, host, mode)
+	headerFindings, localSanitizedHeaders := p.inspectHeadersFromMap(headers, host, mode)
+	sanitizedHeaders := mergeSanitizedHeaders(headers, response.SanitizedHeaders, localSanitizedHeaders)
 	allFindings := append(response.Findings, headerFindings...)
 	hasFindings := len(allFindings) > 0 || strings.EqualFold(response.RiskLevel, "HIGH")
 
@@ -812,6 +816,7 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 }
 
 func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
+	protocol := protocolLabel(resp.Request.URL.Scheme)
 	if !p.inspectResponses {
 		p.events.publish(inspectionEvent{
 			Timestamp:      time.Now().UTC(),
@@ -820,7 +825,7 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 			Path:           resp.Request.URL.Path,
 			Mode:           string(p.modes.current()),
 			Status:         "passed",
-			Protocol:       "HTTPS",
+			Protocol:       protocol,
 			Inspected:      false,
 			ConnectionType: "response",
 		})
@@ -856,7 +861,7 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 				Path:            resp.Request.URL.Path,
 				Mode:            string(mode),
 				Status:          eventStatus,
-				Protocol:        "HTTPS",
+				Protocol:        protocol,
 				Inspected:       false,
 				ConnectionType:  "response",
 				ValidationError: reason,
@@ -910,7 +915,7 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 				Path:            resp.Request.URL.Path,
 				Mode:            string(mode),
 				Status:          "blocked",
-				Protocol:        "HTTPS",
+				Protocol:        protocol,
 				Inspected:       false,
 				ConnectionType:  "response",
 				ValidationError: inspectErr.Error(),
@@ -924,7 +929,7 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 			Path:            resp.Request.URL.Path,
 			Mode:            string(mode),
 			Status:          "engine_unavailable",
-			Protocol:        "HTTPS",
+			Protocol:        protocol,
 			Inspected:       false,
 			ConnectionType:  "response",
 			ValidationError: inspectErr.Error(),
@@ -942,14 +947,15 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 			Path:           resp.Request.URL.Path,
 			Mode:           string(mode),
 			Status:         "fail_open",
-			Protocol:       "HTTPS",
+			Protocol:       protocol,
 			Inspected:      false,
 			ConnectionType: "response",
 		})
 		return nil
 	}
 
-	headerFindings, sanitizedHeaders := p.inspectHeadersFromMap(headers, host, mode)
+	headerFindings, localSanitizedHeaders := p.inspectHeadersFromMap(headers, host, mode)
+	sanitizedHeaders := mergeSanitizedHeaders(headers, response.SanitizedHeaders, localSanitizedHeaders)
 	allFindings := append(response.Findings, headerFindings...)
 	hasFindings := len(allFindings) > 0 || strings.EqualFold(response.RiskLevel, "HIGH")
 
@@ -965,7 +971,7 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 				if compressErr != nil {
 					p.events.publish(inspectionEvent{
 						Timestamp: time.Now().UTC(), Method: resp.Request.Method, Host: host, Path: resp.Request.URL.Path,
-						Mode: string(mode), Status: "recompression_error", Protocol: "HTTPS", Inspected: false,
+						Mode: string(mode), Status: "recompression_error", Protocol: protocol, Inspected: false,
 						ConnectionType: "response", ValidationError: compressErr.Error(),
 					})
 					return nil
@@ -1026,12 +1032,64 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 		BodyTruncated:    bodyTruncated,
 		SanitizedHeaders: headerPreview,
 		Direction:        string(directionResponse),
-		Protocol:         "HTTPS",
+		Protocol:         protocol,
 		Inspected:        true,
 		ConnectionType:   "response",
 	})
 
 	return nil
+}
+
+func mergeSanitizedHeaders(original, engine, local map[string]string) map[string]string {
+	sanitized := make(map[string]string, len(original))
+	for key, value := range original {
+		sanitized[key] = value
+	}
+	for key, value := range engine {
+		originalKey, exists := matchingHeaderKey(original, key)
+		if !exists || !safeHeaderValue(value) || !sanitizableHeader(originalKey, original) {
+			continue
+		}
+		sanitized[originalKey] = value
+	}
+	for key, value := range local {
+		originalKey, exists := matchingHeaderKey(original, key)
+		if exists && value != original[originalKey] {
+			sanitized[originalKey] = value
+		}
+	}
+	return sanitized
+}
+
+func matchingHeaderKey(headers map[string]string, key string) (string, bool) {
+	for existing := range headers {
+		if strings.EqualFold(existing, key) {
+			return existing, true
+		}
+	}
+	return "", false
+}
+
+func safeHeaderValue(value string) bool {
+	for _, character := range value {
+		if character == '\r' || character == '\n' || (character < 0x20 && character != '\t') || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func sanitizableHeader(key string, headers map[string]string) bool {
+	switch strings.ToLower(key) {
+	case "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "content-length", "content-encoding":
+		return false
+	}
+	for _, connectionHeader := range strings.Split(headers["Connection"], ",") {
+		if strings.EqualFold(strings.TrimSpace(connectionHeader), key) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *proxyCore) inspectHeaders(r *http.Request, host string, mode inspectionMode) ([]Finding, map[string]string) {
@@ -1177,6 +1235,11 @@ func resetRequestBody(r *http.Request, body []byte) {
 
 func newInternalServer(events *eventHub, modes *activeMode, addr string, adminAuth *adminAuthenticator, controllers ...*mitmController) *http.Server {
 	mux := http.NewServeMux()
+	loopback, _ := dashboardAddressIsLoopback(addr)
+	requireReadAuth := !loopback
+	authorizeRead := func(w http.ResponseWriter, r *http.Request) bool {
+		return !requireReadAuth || adminAuth.authorize(w, r)
+	}
 	var mitm *mitmController
 	if len(controllers) > 0 {
 		mitm = controllers[0]
@@ -1185,6 +1248,9 @@ func newInternalServer(events *eventHub, modes *activeMode, addr string, adminAu
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !authorizeRead(w, r) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1200,6 +1266,9 @@ func newInternalServer(events *eventHub, modes *activeMode, addr string, adminAu
 		w.Header().Set("Cache-Control", "no-store")
 		switch r.Method {
 		case http.MethodGet:
+			if !authorizeRead(w, r) {
+				return
+			}
 			if mitm == nil {
 				http.Error(w, "CA control unavailable", http.StatusServiceUnavailable)
 				return
@@ -1238,6 +1307,9 @@ func newInternalServer(events *eventHub, modes *activeMode, addr string, adminAu
 		w.Header().Set("Content-Type", "application/json")
 		switch r.Method {
 		case http.MethodGet:
+			if !authorizeRead(w, r) {
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"mode": string(modes.current())})
 		case http.MethodPost:
 			if !adminAuth.authorize(w, r) {
@@ -1267,6 +1339,9 @@ func newInternalServer(events *eventHub, modes *activeMode, addr string, adminAu
 	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !authorizeRead(w, r) {
 			return
 		}
 		flusher, ok := w.(http.Flusher)
@@ -1478,7 +1553,7 @@ func incompletelyInspectedResponse(p *proxyCore, resp *http.Response, host, stat
 	}
 	p.events.publish(inspectionEvent{
 		Timestamp: time.Now().UTC(), Method: resp.Request.Method, Host: host, Path: resp.Request.URL.Path,
-		Mode: string(mode), Status: status, Protocol: "HTTPS", Inspected: false,
+		Mode: string(mode), Status: status, Protocol: protocolLabel(resp.Request.URL.Scheme), Inspected: false,
 		ConnectionType: "response", ValidationError: reason,
 	})
 }

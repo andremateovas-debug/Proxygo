@@ -124,10 +124,12 @@ Accede al panel de monitoreo en tiempo real desde tu navegador en: **`http://127
 El panel escucha por defecto solo en `127.0.0.1:8081`. En el primer inicio,
 ProxyGo genera un token aleatorio de 256 bits y lo guarda en
 `/var/lib/proxygo/admin.token` con permisos `0600`; conserva únicamente su hash
-SHA-256 en memoria y nunca lo devuelve por HTTP ni lo escribe en logs. Al usar
-por primera vez los controles de modo o CA, el dashboard solicita el token y lo
-mantiene solo en memoria hasta cerrar o recargar la página. La TUI lo lee del
-mismo archivo si el usuario tiene permiso.
+SHA-256 en memoria y nunca lo devuelve por HTTP ni lo escribe en logs. En un
+bind loopback, las lecturas del dashboard siguen abiertas; los controles de
+modo y CA solicitan el token. En un bind no-loopback, la primera lectura del
+estado solicita el token y el navegador recibe una cookie de sesión `HttpOnly`
+para mantener abierto el flujo SSE. La TUI lee el mismo token del archivo si el
+usuario tiene permiso.
 
 Para recuperar el token generado en una instalación con `systemd`:
 
@@ -173,12 +175,13 @@ El token se transmite por HTTP al navegador, por lo que un bind remoto requiere
 un canal de red confiable/cifrado; el mecanismo recomendado sigue siendo el
 loopback predeterminado con túnel SSH.
 
-Las operaciones `POST /api/mode` y `POST /api/ca` exigen
-`Authorization: Bearer <token>` y un encabezado `Origin` del mismo origen; los
-orígenes cruzados y encabezados de autorización duplicados se rechazan. La TUI
-lee el token de `PROXYGO_ADMIN_TOKEN` o del archivo configurado. No se requiere
-token para consultar el estado, y las vistas de cabeceras ocultan valores de
-autorización, cookies, claves API, tokens y secretos.
+Las operaciones `POST /api/mode` y `POST /api/ca` siempre exigen
+`Authorization: Bearer <token>` y un encabezado `Origin` del mismo origen. Con
+un bind no-loopback, también lo exigen `GET /api/state`, `GET /api/mode`,
+`GET /api/ca` y `GET /events`; en loopback esas lecturas no requieren token.
+Los orígenes cruzados y encabezados de autorización duplicados se rechazan. La
+TUI adjunta el token a sus lecturas y cambios de estado. Las vistas de cabeceras
+ocultan valores de autorización, cookies, claves API, tokens y secretos.
 
 Si el servicio usa `PROXYGO_ADMIN_TOKEN` desde `/etc/proxygo/admin.env`, inicia
 la TUI cargando ese mismo archivo, por ejemplo:
