@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
 	"testing"
 )
 
@@ -181,5 +183,71 @@ func TestConfiguredConnectConfigRequiresAllowlist(t *testing.T) {
 	t.Setenv("PROXYGO_CA_ORG", "Test Org")
 	if _, err := configuredConnectConfig(); err == nil {
 		t.Fatal("empty allowlist was accepted")
+	}
+}
+
+func TestConnectHandlerNonExistentDomain(t *testing.T) {
+	cfg := connectConfig{
+		ports:        map[int]struct{}{443: {}},
+		allowedHosts: []string{"example.com"},
+		maxTunnels:   1,
+		resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
+			return nil, fmt.Errorf("no such host")
+		},
+	}
+	handler := newConnectHandler(nil, nil, cfg, log.New(io.Discard, "", 0))
+	request := httptest.NewRequest(http.MethodConnect, "http://nonexistent.example.com:443", nil)
+	request.Host = "nonexistent.example.com:443"
+	recorder := httptest.NewRecorder()
+	handler.serve(recorder, request)
+	// Unknown host not in allowlist -> Forbidden
+	if recorder.Code != http.StatusForbidden {
+		t.Errorf("non-existent domain = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestConnectHandlerInvalidCert(t *testing.T) {
+	// Test that certificate generation works with a valid CA
+	caDir := filepath.Join(t.TempDir(), "ca")
+	ca, err := newCertAuthority(caDir, "Test Org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := ca.certificateForHost("example.com")
+	if err != nil {
+		t.Fatalf("certificateForHost failed: %v", err)
+	}
+	if cert == nil {
+		t.Fatal("expected non-nil certificate")
+	}
+	// Verify certificate has proper SAN
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("failed to parse certificate: %v", err)
+	}
+	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != "example.com" {
+		t.Fatalf("expected DNS SAN example.com, got %v", leaf.DNSNames)
+	}
+}
+
+func TestConnectHandlerConcurrentConnections(t *testing.T) {
+	cfg := connectConfig{
+		ports:        map[int]struct{}{443: {}},
+		allowedHosts: []string{"example.com"},
+		maxTunnels:   2,
+	}
+	handler := newConnectHandler(nil, nil, cfg, log.New(io.Discard, "", 0))
+	// Acquire both tunnel slots
+	handler.sem <- struct{}{}
+	handler.sem <- struct{}{}
+	defer func() { <-handler.sem; <-handler.sem }()
+
+	request := httptest.NewRequest(http.MethodConnect, "http://example.com:443", nil)
+	request.Host = "example.com:443"
+	recorder := httptest.NewRecorder()
+	handler.serve(recorder, request)
+	// Third connection should be rejected (too many tunnels)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Errorf("third concurrent connection = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
 	}
 }

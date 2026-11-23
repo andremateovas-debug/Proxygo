@@ -66,6 +66,7 @@ type connectConfig struct {
 	maxTunnels   int
 	caDir        string
 	caOrg        string
+	resolve      func(context.Context, string) ([]netip.Addr, error)
 }
 
 type connectHandler struct {

@@ -143,3 +143,37 @@ func TestCertAuthorityRejectsOpenDirectory(t *testing.T) {
 		t.Fatal("CA directory accessible by group or others was accepted")
 	}
 }
+
+func TestCertAuthorityLeafSignedByCA(t *testing.T) {
+	ca := newTestCA(t)
+	issued, err := ca.certificateForHost("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(issued.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := leaf.CheckSignatureFrom(ca.cert); err != nil {
+		t.Fatalf("leaf certificate not signed by CA: %v", err)
+	}
+}
+
+func TestCertAuthorityValidity(t *testing.T) {
+	ca := newTestCA(t)
+	issued, err := ca.certificateForHost("example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(issued.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if now.Before(leaf.NotBefore) {
+		t.Fatal("leaf not before is in the future")
+	}
+	if now.After(leaf.NotAfter) {
+		t.Fatal("leaf is past its not-after date")
+	}
+}
