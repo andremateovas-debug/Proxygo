@@ -1,6 +1,7 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use super::{shannon_entropy, Finding};
 
@@ -40,6 +41,21 @@ const SECRET_PATTERNS: [(&Lazy<Regex>, &str, &str); 6] = [
         "[REDACTED_DATABASE_URL_CREDENTIALS]",
     ),
 ];
+
+pub(crate) fn sanitize_headers(headers: &HashMap<String, String>) -> (Vec<Finding>, HashMap<String, String>) {
+    let mut findings = Vec::new();
+    let mut sanitized = HashMap::new();
+
+    for (key, value) in headers {
+        let lower_key = key.to_ascii_lowercase();
+        let mut header_findings = Vec::new();
+        let sanitized_value = sanitize_string(value, &format!("header.{}", lower_key), &mut header_findings);
+        findings.append(&mut header_findings);
+        sanitized.insert(key.clone(), sanitized_value);
+    }
+
+    (findings, sanitized)
+}
 
 pub(crate) fn sanitize_body(body: &str) -> (String, Vec<Finding>) {
     match serde_json::from_str::<Value>(body) {
@@ -120,8 +136,9 @@ fn add_finding(findings: &mut Vec<Finding>, kind: &str, path: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_body;
+    use super::{sanitize_body, sanitize_headers};
     use serde_json::Value;
+    use std::collections::HashMap;
 
     #[test]
     fn redacts_secrets_and_keeps_nested_json_intact() {
@@ -155,5 +172,32 @@ mod tests {
 
         assert!(sanitized.contains("[REDACTED_ANTHROPIC_KEY]"));
         assert_eq!(findings.len(), 1);
+    }
+
+    #[test]
+    fn scans_header_values_for_secrets() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_owned(), "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.signature".to_owned());
+        headers.insert("X-API-Key".to_owned(), "sk-ant-api03-abcdefghijklmnopqrstuvwx".to_owned());
+        headers.insert("Safe-Header".to_owned(), "just a normal value".to_owned());
+
+        let (findings, sanitized) = sanitize_headers(&headers);
+
+        let kinds: Vec<&str> = findings.iter().map(|f| f.kind.as_str()).collect();
+        assert!(kinds.contains(&"BEARER_JWT"));
+        assert!(kinds.contains(&"ANTHROPIC_KEY"));
+        assert_eq!(sanitized.get("Authorization"), Some(&String::from("[REDACTED_BEARER_JWT]")));
+        assert_eq!(sanitized.get("X-API-Key"), Some(&String::from("[REDACTED_ANTHROPIC_KEY]")));
+        assert_eq!(sanitized.get("Safe-Header"), Some(&String::from("just a normal value")));
+    }
+
+    #[test]
+    fn header_findings_include_header_name_in_path() {
+        let mut headers = HashMap::new();
+        headers.insert("Cookie".to_owned(), "session=sk-ant-api03-abcdefghijklmnopqrstuvwx".to_owned());
+
+        let (findings, _) = sanitize_headers(&headers);
+
+        assert!(findings.iter().any(|f| f.path == "header.cookie"));
     }
 }

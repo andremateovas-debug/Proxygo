@@ -38,18 +38,21 @@ const (
 )
 
 type inspectionEvent struct {
-	Seq           uint64    `json:"seq,omitempty"`
-	ID            string    `json:"id,omitempty"`
-	Timestamp     time.Time `json:"timestamp"`
-	Method        string    `json:"method"`
-	Host          string    `json:"host"`
-	Mode          string    `json:"mode"`
-	Status        string    `json:"status"`
-	Category      string    `json:"category,omitempty"`
-	RiskLevel     string    `json:"risk_level,omitempty"`
-	Findings      []Finding `json:"findings,omitempty"`
-	SanitizedBody string    `json:"sanitized_body,omitempty"`
-	BodyTruncated bool      `json:"body_truncated,omitempty"`
+	Seq              uint64            `json:"seq,omitempty"`
+	ID               string            `json:"id,omitempty"`
+	Timestamp        time.Time         `json:"timestamp"`
+	Method           string            `json:"method"`
+	Host             string            `json:"host"`
+	Path             string            `json:"path,omitempty"`
+	Mode             string            `json:"mode"`
+	Status           string            `json:"status"`
+	Category         string            `json:"category,omitempty"`
+	RiskLevel        string            `json:"risk_level,omitempty"`
+	Findings         []Finding         `json:"findings,omitempty"`
+	SanitizedBody    string            `json:"sanitized_body,omitempty"`
+	BodyTruncated    bool              `json:"body_truncated,omitempty"`
+	SanitizedHeaders map[string]string `json:"sanitized_headers,omitempty"`
+	Direction        string            `json:"direction,omitempty"`
 }
 
 type minuteBucket struct {
@@ -355,10 +358,26 @@ func configuredFailurePolicy() (FailurePolicy, error) {
 }
 
 type proxyCore struct {
-	engine *udsClient
-	modes  *activeMode
-	events *eventHub
+	engine      *udsClient
+	modes       *activeMode
+	events      *eventHub
+	credentials sync.Map // credential value -> first-seen host
 }
+
+type inspectionResult struct {
+	proceed          bool
+	sanitizedBody    []byte
+	sanitizedHeaders map[string]string
+	status           string
+	event            inspectionEvent
+}
+
+type inspectionDirection string
+
+const (
+	directionRequest  inspectionDirection = "REQUEST"
+	directionResponse inspectionDirection = "RESPONSE"
+)
 
 func newHTTPProxy(core *proxyCore, connect *connectHandler, addr string) *http.Server {
 	reverseProxy := &httputil.ReverseProxy{
@@ -407,10 +426,12 @@ func newHTTPProxy(core *proxyCore, connect *connectHandler, addr string) *http.S
 }
 
 func (p *proxyCore) inspect(w http.ResponseWriter, r *http.Request, host string) bool {
-	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch {
-		return true
-	}
+	return p.inspectRequest(w, r, host)
+}
+
+func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host string) bool {
 	mode := p.modes.current()
+
 	var body []byte
 	if r.Body != nil {
 		var err error
@@ -422,11 +443,30 @@ func (p *proxyCore) inspect(w http.ResponseWriter, r *http.Request, host string)
 		}
 	}
 	resetRequestBody(r, body)
-	response, inspectErr := p.engine.Inspect(r.Context(), r.Method, host, body)
+
+	headers := headerMap(r.Header)
+	path := r.URL.Path
+	contentType := r.Header.Get("Content-Type")
+
+	req := InspectionRequest{
+		ID:           eventID(),
+		Method:       r.Method,
+		Host:         host,
+		Path:         path,
+		Body:         string(body),
+		Headers:      headers,
+		Direction:    string(directionRequest),
+		ConnectionID: connID(r),
+		ClientID:     clientID(r),
+		ContentType:  contentType,
+	}
+
+	response, inspectErr := p.engine.Inspect(r.Context(), req)
 	if inspectErr != nil {
 		p.events.publish(inspectionEvent{
 			Timestamp: time.Now().UTC(), Method: r.Method, Host: host,
-			Mode: string(mode), Status: "engine_unavailable",
+			Path: path, Mode: string(mode), Status: "engine_unavailable",
+			Direction: string(directionRequest),
 		})
 		http.Error(w, "inspection engine unavailable", http.StatusServiceUnavailable)
 		return false
@@ -434,35 +474,293 @@ func (p *proxyCore) inspect(w http.ResponseWriter, r *http.Request, host string)
 	if response == nil {
 		p.events.publish(inspectionEvent{
 			Timestamp: time.Now().UTC(), Method: r.Method, Host: host,
-			Mode: string(mode), Status: "fail_open",
+			Path: path, Mode: string(mode), Status: "fail_open",
+			Direction: string(directionRequest),
 		})
 		return true
 	}
 
-	hasFindings := len(response.Findings) > 0 || strings.EqualFold(response.RiskLevel, "HIGH")
+	headerFindings, sanitizedHeaders := p.inspectHeaders(r, host, mode)
+	allFindings := append(response.Findings, headerFindings...)
+	hasFindings := len(allFindings) > 0 || strings.EqualFold(response.RiskLevel, "HIGH")
+
 	status := "passed"
 	if mode == modeBlock && hasFindings {
 		status = "blocked"
 	} else if mode == modeSanitize && hasFindings {
 		status = "sanitized"
 	}
+
 	bodyPreview, bodyTruncated := eventBodyPreview(response.SanitizedBody)
+	headerPreview := sanitizeHeaderPreview(sanitizedHeaders)
 	p.events.publish(inspectionEvent{
-		ID: response.ID, Timestamp: time.Now().UTC(), Method: r.Method,
-		Host: host, Mode: string(mode), Status: status,
-		Category: response.Category, RiskLevel: response.RiskLevel,
-		Findings:      response.Findings,
-		SanitizedBody: bodyPreview, BodyTruncated: bodyTruncated,
+		ID:               response.ID,
+		Timestamp:        time.Now().UTC(),
+		Method:           r.Method,
+		Host:             host,
+		Path:             path,
+		Mode:             string(mode),
+		Status:           status,
+		Category:         response.Category,
+		RiskLevel:        response.RiskLevel,
+		Findings:         allFindings,
+		SanitizedBody:    bodyPreview,
+		BodyTruncated:    bodyTruncated,
+		SanitizedHeaders: headerPreview,
+		Direction:        string(directionRequest),
 	})
 
 	if mode == modeBlock && hasFindings {
 		http.Error(w, "request blocked by DLP policy", http.StatusForbidden)
 		return false
 	}
+
 	if mode == modeSanitize && hasFindings {
-		resetRequestBody(r, []byte(response.SanitizedBody))
+		if response.SanitizedBody != "" {
+			resetRequestBody(r, []byte(response.SanitizedBody))
+		}
+		for k, v := range sanitizedHeaders {
+			if v == "" {
+				r.Header.Del(k)
+			} else {
+				r.Header.Set(k, v)
+			}
+		}
+		if _, ok := sanitizedHeaders["Content-Length"]; ok {
+			r.Header.Set("Content-Length", sanitizedHeaders["Content-Length"])
+		} else if len(sanitizedHeaders) > 0 {
+			r.Header.Del("Content-Length")
+			r.Header.Del("Transfer-Encoding")
+		}
 	}
+
 	return true
+}
+
+func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
+	mode := p.modes.current()
+
+	var body []byte
+	if resp.Body != nil {
+		var err error
+		limited := io.LimitReader(resp.Body, maxRequestBodyBytes)
+		body, err = io.ReadAll(limited)
+		_ = resp.Body.Close()
+		if err != nil {
+			return err
+		}
+	}
+
+	headers := headerMap(resp.Header)
+	contentType := resp.Header.Get("Content-Type")
+
+	req := InspectionRequest{
+		ID:           eventID(),
+		Method:       resp.Request.Method,
+		Host:         host,
+		Path:         resp.Request.URL.Path,
+		Body:         string(body),
+		Headers:      headers,
+		Direction:    string(directionResponse),
+		ConnectionID: connIDFromRequest(resp.Request),
+		ClientID:     clientIDFromRequest(resp.Request),
+		ContentType:  contentType,
+	}
+
+	response, inspectErr := p.engine.Inspect(resp.Request.Context(), req)
+	if inspectErr != nil {
+		p.events.publish(inspectionEvent{
+			Timestamp: time.Now().UTC(), Method: resp.Request.Method, Host: host,
+			Path: resp.Request.URL.Path, Mode: string(mode), Status: "engine_unavailable",
+			Direction: string(directionResponse),
+		})
+		return inspectErr
+	}
+	if response == nil {
+		p.events.publish(inspectionEvent{
+			Timestamp: time.Now().UTC(), Method: resp.Request.Method, Host: host,
+			Path: resp.Request.URL.Path, Mode: string(mode), Status: "fail_open",
+			Direction: string(directionResponse),
+		})
+		return nil
+	}
+
+	headerFindings, sanitizedHeaders := p.inspectHeadersFromMap(headers, host, mode)
+	allFindings := append(response.Findings, headerFindings...)
+	hasFindings := len(allFindings) > 0 || strings.EqualFold(response.RiskLevel, "HIGH")
+
+	status := "passed"
+	if mode == modeBlock && hasFindings {
+		status = "blocked"
+	} else if mode == modeSanitize && hasFindings {
+		status = "sanitized"
+	}
+
+	bodyPreview, bodyTruncated := eventBodyPreview(response.SanitizedBody)
+	headerPreview := sanitizeHeaderPreview(sanitizedHeaders)
+	p.events.publish(inspectionEvent{
+		ID:               response.ID,
+		Timestamp:        time.Now().UTC(),
+		Method:           resp.Request.Method,
+		Host:             host,
+		Path:             resp.Request.URL.Path,
+		Mode:             string(mode),
+		Status:           status,
+		Category:         response.Category,
+		RiskLevel:        response.RiskLevel,
+		Findings:         allFindings,
+		SanitizedBody:    bodyPreview,
+		BodyTruncated:    bodyTruncated,
+		SanitizedHeaders: headerPreview,
+		Direction:        string(directionResponse),
+	})
+
+	if mode == modeBlock && hasFindings {
+		resp.StatusCode = http.StatusForbidden
+		resp.Body = io.NopCloser(bytes.NewReader([]byte("response blocked by DLP policy\n")))
+		resp.ContentLength = int64(len([]byte("response blocked by DLP policy\n")))
+		resp.Header.Set("Content-Length", fmt.Sprint(resp.ContentLength))
+		return nil
+	}
+
+	if mode == modeSanitize && hasFindings {
+		if response.SanitizedBody != "" && !isCompressed(resp) {
+			resp.Body = io.NopCloser(bytes.NewReader([]byte(response.SanitizedBody)))
+			resp.ContentLength = int64(len(response.SanitizedBody))
+			resp.Header.Set("Content-Length", fmt.Sprint(resp.ContentLength))
+		}
+		for k, v := range sanitizedHeaders {
+			if v == "" {
+				resp.Header.Del(k)
+			} else {
+				resp.Header.Set(k, v)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (p *proxyCore) inspectHeaders(r *http.Request, host string, mode inspectionMode) ([]Finding, map[string]string) {
+	return p.inspectHeadersFromMap(headerMap(r.Header), host, mode)
+}
+
+func (p *proxyCore) inspectHeadersFromMap(headers map[string]string, host string, mode inspectionMode) ([]Finding, map[string]string) {
+	var findings []Finding
+	sanitized := make(map[string]string)
+
+	for k, v := range headers {
+		lower := strings.ToLower(k)
+		sanitized[k] = v
+
+		credential := extractCredential(lower, v)
+		if credential == "" {
+			continue
+		}
+
+		if firstHost, ok := p.credentials.Load(credential); ok {
+			if firstHost.(string) != host {
+				findings = append(findings, Finding{Kind: "CREDENTIAL_LEAK", Path: fmt.Sprintf("header.%s", lower)})
+				if mode == modeSanitize {
+					sanitized[k] = ""
+				}
+				continue
+			}
+		} else {
+			p.credentials.Store(credential, host)
+		}
+	}
+
+	return findings, sanitized
+}
+
+func extractCredential(lowerHeader string, value string) string {
+	switch lowerHeader {
+	case "authorization":
+		if strings.HasPrefix(strings.ToLower(value), "bearer ") {
+			return strings.TrimSpace(strings.TrimPrefix(value, "Bearer "))
+		}
+		if strings.HasPrefix(strings.ToLower(value), "basic ") {
+			return strings.TrimSpace(strings.TrimPrefix(value, "Basic "))
+		}
+		return value
+	case "proxy-authorization":
+		if strings.HasPrefix(strings.ToLower(value), "bearer ") {
+			return strings.TrimSpace(strings.TrimPrefix(value, "Bearer "))
+		}
+		return value
+	case "x-api-key":
+		return value
+	default:
+		if strings.HasPrefix(lowerHeader, "x-") || strings.HasPrefix(lowerHeader, "proxy-") {
+			return value
+		}
+		return ""
+	}
+}
+
+func headerMap(h http.Header) map[string]string {
+	m := make(map[string]string, len(h))
+	for k, v := range h {
+		if len(v) > 0 {
+			m[k] = v[0]
+		}
+	}
+	return m
+}
+
+func sanitizeHeaderPreview(headers map[string]string) map[string]string {
+	preview := make(map[string]string)
+	for k, v := range headers {
+		if len(v) > 128 {
+			preview[k] = v[:128] + "..."
+		} else {
+			preview[k] = v
+		}
+	}
+	return preview
+}
+
+func eventID() string {
+	return fmt.Sprintf("evt-%d", time.Now().UnixNano())
+}
+
+func connID(r *http.Request) string {
+	if r.RemoteAddr != "" {
+		return r.RemoteAddr
+	}
+	return ""
+}
+
+func connIDFromRequest(r *http.Request) string {
+	return connID(r)
+}
+
+func clientID(r *http.Request) string {
+	if auth := r.Header.Get("Authorization"); auth != "" {
+		return fmt.Sprintf("auth-%x", simpleHash(auth))
+	}
+	if r.RemoteAddr != "" {
+		return fmt.Sprintf("ip-%s", r.RemoteAddr)
+	}
+	return ""
+}
+
+func clientIDFromRequest(r *http.Request) string {
+	return clientID(r)
+}
+
+func simpleHash(s string) uint32 {
+	var h uint32
+	for i := 0; i < len(s); i++ {
+		h = h*31 + uint32(s[i])
+	}
+	return h
+}
+
+func isCompressed(resp *http.Response) bool {
+	encoding := strings.ToLower(resp.Header.Get("Content-Encoding"))
+	return encoding != "" && encoding != "identity"
 }
 
 func resetRequestBody(r *http.Request, body []byte) {

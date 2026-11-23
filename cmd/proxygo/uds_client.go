@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"strconv"
 	"sync/atomic"
 	"time"
 )
@@ -19,6 +18,7 @@ const (
 	engineTimeout       = 15 * time.Millisecond
 	maxEngineLineBytes  = 32 << 20
 	defaultSocketPath   = "/run/proxygo/engine.sock"
+	maxInspectBodyBytes = 1 << 20
 )
 
 var ErrEngineUnavailable = errors.New("inspection engine unavailable")
@@ -31,10 +31,16 @@ const (
 )
 
 type InspectionRequest struct {
-	ID     string `json:"id"`
-	Method string `json:"method"`
-	Host   string `json:"host"`
-	Body   string `json:"body"`
+	ID           string            `json:"id"`
+	Method       string            `json:"method"`
+	Host         string            `json:"host"`
+	Path         string            `json:"path,omitempty"`
+	Body         string            `json:"body"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	Direction    string            `json:"direction,omitempty"`
+	ConnectionID string            `json:"connection_id,omitempty"`
+	ClientID     string            `json:"client_id,omitempty"`
+	ContentType  string            `json:"content_type,omitempty"`
 }
 
 type Finding struct {
@@ -43,11 +49,12 @@ type Finding struct {
 }
 
 type InspectionResponse struct {
-	ID            string    `json:"id"`
-	Category      string    `json:"category"`
-	RiskLevel     string    `json:"risk_level"`
-	Findings      []Finding `json:"findings"`
-	SanitizedBody string    `json:"sanitized_body"`
+	ID               string            `json:"id"`
+	Category         string            `json:"category"`
+	RiskLevel        string            `json:"risk_level"`
+	Findings         []Finding         `json:"findings"`
+	SanitizedBody    string            `json:"sanitized_body"`
+	SanitizedHeaders map[string]string `json:"sanitized_headers,omitempty"`
 }
 
 type udsClient struct {
@@ -66,19 +73,15 @@ func newUDSClient(socketPath string, policy FailurePolicy, logger *log.Logger) *
 
 // Inspect sends one NDJSON request over a dedicated Unix socket connection.
 // A fresh connection avoids sharing framed request/response streams across callers.
-func (c *udsClient) Inspect(ctx context.Context, method, host string, body []byte) (*InspectionResponse, error) {
-	requestID := strconv.FormatUint(c.sequence.Add(1), 10)
-	request := InspectionRequest{
-		ID:     requestID,
-		Method: method,
-		Host:   host,
-		Body:   string(body),
+func (c *udsClient) Inspect(ctx context.Context, request InspectionRequest) (*InspectionResponse, error) {
+	if len(request.Body) > maxInspectBodyBytes {
+		request.Body = request.Body[:maxInspectBodyBytes]
 	}
 
 	response, err := c.roundTrip(ctx, request)
 	if err != nil {
 		if c.policy == FailOpen {
-			c.logger.Printf("SYSTEM ALERT: DLP inspection bypassed for request %s: %v", requestID, err)
+			c.logger.Printf("SYSTEM ALERT: DLP inspection bypassed for request %s: %v", request.ID, err)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("%w: %v", ErrEngineUnavailable, err)

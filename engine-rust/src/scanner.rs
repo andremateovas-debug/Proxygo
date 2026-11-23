@@ -9,7 +9,19 @@ pub struct InspectionRequest {
     pub id: String,
     pub method: String,
     pub host: String,
+    #[serde(default)]
+    pub path: String,
     pub body: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub direction: String,
+    #[serde(default)]
+    pub connection_id: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub content_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -25,11 +37,21 @@ pub struct InspectionResponse {
     pub risk_level: String,
     pub findings: Vec<Finding>,
     pub sanitized_body: String,
+    #[serde(default)]
+    pub sanitized_headers: HashMap<String, String>,
 }
 
 pub fn inspect(request: &InspectionRequest) -> InspectionResponse {
     let category = classify(&request.host, &request.body);
-    let (sanitized_body, findings) = sanitizer::sanitize_body(&request.body);
+    let (sanitized_body, mut findings) = sanitizer::sanitize_body(&request.body);
+
+    let mut sanitized_headers = HashMap::new();
+    let (header_findings, scanned_headers) = sanitizer::sanitize_headers(&request.headers);
+    findings.extend(header_findings);
+    for (key, value) in &request.headers {
+        sanitized_headers.insert(key.clone(), scanned_headers.get(key).cloned().unwrap_or(value.clone()));
+    }
+
     let risk_level = if findings.is_empty() { "LOW" } else { "HIGH" };
 
     InspectionResponse {
@@ -38,6 +60,7 @@ pub fn inspect(request: &InspectionRequest) -> InspectionResponse {
         risk_level: risk_level.to_owned(),
         findings,
         sanitized_body,
+        sanitized_headers,
     }
 }
 
@@ -99,13 +122,20 @@ pub fn shannon_entropy(value: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{inspect, shannon_entropy, InspectionRequest};
+    use std::collections::HashMap;
 
     fn request(host: &str, body: &str) -> InspectionRequest {
         InspectionRequest {
             id: "test-1".to_owned(),
             method: "POST".to_owned(),
             host: host.to_owned(),
+            path: String::new(),
             body: body.to_owned(),
+            headers: HashMap::new(),
+            direction: String::new(),
+            connection_id: String::new(),
+            client_id: String::new(),
+            content_type: String::new(),
         }
     }
 

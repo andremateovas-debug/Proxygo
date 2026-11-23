@@ -283,6 +283,9 @@ func (h *connectHandler) serveTunnel(conn net.Conn, host string, port int, trans
 			request.SetURL(target)
 		},
 		Transport: transport,
+		ModifyResponse: func(resp *http.Response) error {
+			return h.core.inspectResponse(resp, host)
+		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			h.logger.Printf("connect upstream %s: %v", authority, err)
 			http.Error(w, "upstream unavailable", http.StatusBadGateway)
