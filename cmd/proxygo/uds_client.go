@@ -15,13 +15,15 @@ import (
 )
 
 const (
-	engineTimeout       = 15 * time.Millisecond
-	maxEngineLineBytes  = 32 << 20
-	defaultSocketPath   = "/run/proxygo/engine.sock"
-	maxInspectBodyBytes = 1 << 20
+	engineTimeout             = 15 * time.Millisecond
+	maxEngineLineBytes        = 32 << 20
+	maxEngineRequestLineBytes = 1 << 20
+	defaultSocketPath         = "/run/proxygo/engine.sock"
+	maxInspectBodyBytes       = 1 << 20
 )
 
 var ErrEngineUnavailable = errors.New("inspection engine unavailable")
+var ErrInspectionLimitExceeded = errors.New("inspection limit exceeded")
 
 type FailurePolicy string
 
@@ -80,11 +82,14 @@ func newUDSClientWithTimeout(socketPath string, policy FailurePolicy, timeout ti
 // A fresh connection avoids sharing framed request/response streams across callers.
 func (c *udsClient) Inspect(ctx context.Context, request InspectionRequest) (*InspectionResponse, error) {
 	if len(request.Body) > maxInspectBodyBytes {
-		return nil, fmt.Errorf("inspection body exceeds %d-byte engine limit", maxInspectBodyBytes)
+		return nil, fmt.Errorf("%w: body exceeds %d-byte engine limit", ErrInspectionLimitExceeded, maxInspectBodyBytes)
 	}
 
 	response, err := c.roundTrip(ctx, request)
 	if err != nil {
+		if errors.Is(err, ErrInspectionLimitExceeded) {
+			return nil, err
+		}
 		if c.policy == FailOpen {
 			c.logger.Printf("SYSTEM ALERT: DLP inspection bypassed for request %s: %v", request.ID, err)
 			return nil, nil
@@ -95,6 +100,15 @@ func (c *udsClient) Inspect(ctx context.Context, request InspectionRequest) (*In
 }
 
 func (c *udsClient) roundTrip(parent context.Context, request InspectionRequest) (*InspectionResponse, error) {
+	line, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	line = append(line, '\n')
+	if len(line) > maxEngineRequestLineBytes {
+		return nil, fmt.Errorf("%w: request line exceeds %d-byte engine limit", ErrInspectionLimitExceeded, maxEngineRequestLineBytes)
+	}
+
 	ctx, cancel := context.WithTimeout(parent, c.timeout)
 	defer cancel()
 
@@ -112,11 +126,6 @@ func (c *udsClient) roundTrip(parent context.Context, request InspectionRequest)
 		}
 	}
 
-	line, err := json.Marshal(request)
-	if err != nil {
-		return nil, err
-	}
-	line = append(line, '\n')
 	if err := writeAll(conn, line); err != nil {
 		return nil, err
 	}

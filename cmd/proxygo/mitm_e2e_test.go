@@ -15,7 +15,6 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +25,7 @@ import (
 
 func startFakeEngine(t *testing.T) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "engine.sock")
+	sock := shortTestSocketPath(t)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +148,7 @@ func newMITMFixture(t *testing.T, enginePolicy FailurePolicy, mode inspectionMod
 	fixture.proxyCA = newTestCA(t)
 	fixture.proxyRoots = x509.NewCertPool()
 	fixture.proxyRoots.AddCert(fixture.proxyCA.cert)
-	engineSocket := filepath.Join(t.TempDir(), "engine.sock")
+	engineSocket := shortTestSocketPath(t)
 	if engineAvailable {
 		engineSocket = startFakeEngine(t)
 	}

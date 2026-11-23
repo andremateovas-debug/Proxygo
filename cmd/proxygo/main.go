@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -30,7 +31,9 @@ const (
 	maxRequestBodyBytes    = 32 << 20
 	maxEventBodyBytes      = 64 << 10
 	maxHistoryEvents       = 500
+	maxTrackedCredentials  = 4096
 	bucketRetentionMins    = 60
+	credentialRetention    = time.Hour
 	defaultMaxBodyBytes    = 32 << 20
 	maxEngineBodyBytes     = int64(maxInspectBodyBytes)
 	defaultEngineTimeoutMs = 15
@@ -427,7 +430,8 @@ type proxyCore struct {
 	engine              *udsClient
 	modes               *activeMode
 	events              *eventHub
-	credentials         sync.Map
+	credentialsMu       sync.Mutex
+	credentials         map[string]credentialRecord
 	securityPolicy      securityPolicy
 	inspectRequests     bool
 	inspectResponses    bool
@@ -436,6 +440,11 @@ type proxyCore struct {
 	blockPrivateNetwork bool
 	maxBodyBytes        int64
 	mitm                *mitmController
+}
+
+type credentialRecord struct {
+	host   string
+	seenAt time.Time
 }
 
 type inspectionResult struct {
@@ -545,7 +554,11 @@ func syncRequestBodyLength(r *http.Request) {
 }
 
 func setResponseBody(resp *http.Response, body []byte) {
-	resp.Body = io.NopCloser(bytes.NewReader(body))
+	newBody := io.NopCloser(bytes.NewReader(body))
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	resp.Body = newBody
 	resp.ContentLength = int64(len(body))
 	syncResponseBodyFraming(resp)
 }
@@ -561,11 +574,17 @@ func syncResponseBodyFraming(resp *http.Response) {
 func newHTTPProxy(core *proxyCore, connect *connectHandler, addr string) *http.Server {
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
-			target := *request.In.URL
-			request.SetURL(&target)
+			target := &url.URL{Scheme: request.In.URL.Scheme, Host: request.In.URL.Host}
+			request.SetURL(target)
 		},
 		ModifyResponse: func(response *http.Response) error {
-			return core.inspectResponse(response, response.Request.URL.Hostname())
+			if err := core.inspectResponse(response, response.Request.URL.Hostname()); err != nil {
+				response.StatusCode = http.StatusServiceUnavailable
+				response.Status = "503 Service Unavailable"
+				response.Header.Set("Content-Type", "text/plain; charset=utf-8")
+				setResponseBody(response, []byte("response blocked: inspection engine unavailable\n"))
+			}
+			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
 			log.Printf("upstream proxy error: %v", err)
@@ -693,7 +712,7 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 
 	response, inspectErr := p.engine.Inspect(r.Context(), req)
 	if inspectErr != nil {
-		if p.securityPolicy == BlockUninspected {
+		if p.blocksEngineFailure() {
 			p.events.publish(inspectionEvent{
 				Timestamp:       time.Now().UTC(),
 				Method:          r.Method,
@@ -762,14 +781,8 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 				if k == "Content-Encoding" || k == "Content-Length" || k == "Transfer-Encoding" {
 					continue
 				}
-				if v == "" {
-					if r.Header.Get(k) != "" {
-						headerReplaced = true
-					}
-					r.Header.Del(k)
-				} else if r.Header.Get(k) != v {
+				if applySanitizedHeader(r.Header, k, v) {
 					headerReplaced = true
-					r.Header.Set(k, v)
 				}
 			}
 			if bodyReplaced {
@@ -907,7 +920,7 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 
 	response, inspectErr := p.engine.Inspect(resp.Request.Context(), req)
 	if inspectErr != nil {
-		if p.securityPolicy == BlockUninspected {
+		if p.blocksEngineFailure() {
 			p.events.publish(inspectionEvent{
 				Timestamp:       time.Now().UTC(),
 				Method:          resp.Request.Method,
@@ -987,14 +1000,8 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 				if k == "Content-Encoding" || k == "Content-Length" || k == "Transfer-Encoding" {
 					continue
 				}
-				if v == "" {
-					if resp.Header.Get(k) != "" {
-						headerReplaced = true
-					}
-					resp.Header.Del(k)
-				} else if resp.Header.Get(k) != v {
+				if applySanitizedHeader(resp.Header, k, v) {
 					headerReplaced = true
-					resp.Header.Set(k, v)
 				}
 			}
 			if bodyReplaced && !compressed {
@@ -1047,7 +1054,7 @@ func mergeSanitizedHeaders(original, engine, local map[string]string) map[string
 	}
 	for key, value := range engine {
 		originalKey, exists := matchingHeaderKey(original, key)
-		if !exists || !safeHeaderValue(value) || !sanitizableHeader(originalKey, original) {
+		if !exists || strings.Count(value, "\n") > strings.Count(original[originalKey], "\n") || !safeHeaderValue(value) || !sanitizableHeader(originalKey, original) {
 			continue
 		}
 		sanitized[originalKey] = value
@@ -1071,9 +1078,11 @@ func matchingHeaderKey(headers map[string]string, key string) (string, bool) {
 }
 
 func safeHeaderValue(value string) bool {
-	for _, character := range value {
-		if character == '\r' || character == '\n' || (character < 0x20 && character != '\t') || character == 0x7f {
-			return false
+	for _, item := range strings.Split(value, "\n") {
+		for _, character := range item {
+			if character == '\r' || character == '\n' || (character < 0x20 && character != '\t') || character == 0x7f {
+				return false
+			}
 		}
 	}
 	return true
@@ -1084,7 +1093,9 @@ func sanitizableHeader(key string, headers map[string]string) bool {
 	case "connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "content-length", "content-encoding":
 		return false
 	}
-	for _, connectionHeader := range strings.Split(headers["Connection"], ",") {
+	for _, connectionHeader := range strings.FieldsFunc(headers["Connection"], func(character rune) bool {
+		return character == ',' || character == '\n'
+	}) {
 		if strings.EqualFold(strings.TrimSpace(connectionHeader), key) {
 			return false
 		}
@@ -1096,6 +1107,35 @@ func (p *proxyCore) inspectHeaders(r *http.Request, host string, mode inspection
 	return p.inspectHeadersFromMap(headerMap(r.Header), host, mode)
 }
 
+func (p *proxyCore) blocksEngineFailure() bool {
+	return p.securityPolicy == BlockUninspected || (p.engine != nil && p.engine.policy == FailClosed)
+}
+
+func (p *proxyCore) credentialHost(credential, host string, now time.Time) (string, bool) {
+	p.credentialsMu.Lock()
+	defer p.credentialsMu.Unlock()
+	if p.credentials == nil {
+		p.credentials = make(map[string]credentialRecord)
+	}
+	if record, exists := p.credentials[credential]; exists {
+		if now.Sub(record.seenAt) < credentialRetention {
+			record.seenAt = now
+			p.credentials[credential] = record
+			return record.host, true
+		}
+		delete(p.credentials, credential)
+	}
+	if len(p.credentials) >= maxTrackedCredentials {
+		// shortcut: evict one arbitrary entry at capacity; use an expiry queue if credential churn needs deterministic retention.
+		for key := range p.credentials {
+			delete(p.credentials, key)
+			break
+		}
+	}
+	p.credentials[credential] = credentialRecord{host: host, seenAt: now}
+	return "", false
+}
+
 func (p *proxyCore) inspectHeadersFromMap(headers map[string]string, host string, mode inspectionMode) ([]Finding, map[string]string) {
 	var findings []Finding
 	sanitized := make(map[string]string)
@@ -1104,21 +1144,18 @@ func (p *proxyCore) inspectHeadersFromMap(headers map[string]string, host string
 		lower := strings.ToLower(k)
 		sanitized[k] = v
 
-		credential := extractCredential(lower, v)
-		if credential == "" {
-			continue
-		}
-
-		if firstHost, ok := p.credentials.Load(credential); ok {
-			if firstHost.(string) != host {
+		for _, value := range strings.Split(v, "\n") {
+			credential := extractCredential(lower, value)
+			if credential == "" {
+				continue
+			}
+			if firstHost, ok := p.credentialHost(credential, host, time.Now()); ok && firstHost != host {
 				findings = append(findings, Finding{Kind: "CREDENTIAL_LEAK", Path: fmt.Sprintf("header.%s", lower)})
 				if mode == modeSanitize {
 					sanitized[k] = ""
 				}
-				continue
+				break
 			}
-		} else {
-			p.credentials.Store(credential, host)
 		}
 	}
 
@@ -1154,10 +1191,36 @@ func headerMap(h http.Header) map[string]string {
 	m := make(map[string]string, len(h))
 	for k, v := range h {
 		if len(v) > 0 {
-			m[k] = v[0]
+			m[k] = strings.Join(v, "\n")
 		}
 	}
 	return m
+}
+
+func applySanitizedHeader(headers http.Header, key, value string) bool {
+	oldValues := headers.Values(key)
+	if value == "" {
+		if len(oldValues) > 0 {
+			headers.Del(key)
+			return true
+		}
+		return false
+	}
+	values := strings.Split(value, "\n")
+	if len(oldValues) == len(values) {
+		equal := true
+		for index := range values {
+			if oldValues[index] != values[index] {
+				equal = false
+				break
+			}
+		}
+		if equal {
+			return false
+		}
+	}
+	headers[http.CanonicalHeaderKey(key)] = values
+	return true
 }
 
 func sanitizeHeaderPreview(headers map[string]string) map[string]string {

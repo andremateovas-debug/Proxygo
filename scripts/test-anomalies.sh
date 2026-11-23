@@ -3,9 +3,11 @@ set -Eeuo pipefail
 
 PROXY_URL="${PROXYGO_TEST_PROXY_URL:-http://127.0.0.1:8080}"
 CONTROL_URL="${PROXYGO_TEST_CONTROL_URL:-http://127.0.0.1:8081}"
+CONTROL_ORIGIN="${CONTROL_URL%/}"
 TARGET_URL="${PROXYGO_TEST_TARGET_URL:-http://httpbin.org/post}"
 RESTORE_MODE="${PROXYGO_RESTORE_MODE:-}"
 TIMEOUT="${PROXYGO_TEST_TIMEOUT:-10}"
+ADMIN_TOKEN="${PROXYGO_ADMIN_TOKEN:-}"
 ENGINE_SERVICE="proxygo-engine.service"
 engine_was_active=0
 
@@ -16,6 +18,8 @@ fail() {
 
 set_mode() {
 	curl --fail --silent --show-error --max-time 3 \
+		-H "Origin: $CONTROL_ORIGIN" \
+		-H "Authorization: Bearer $ADMIN_TOKEN" \
 		-H 'Content-Type: application/json' \
 		-d "{\"mode\":\"$1\"}" \
 		"$CONTROL_URL/api/mode" >/dev/null
@@ -43,8 +47,18 @@ command -v curl >/dev/null || fail 'curl no está instalado'
 command -v systemctl >/dev/null || fail 'systemctl no está disponible'
 systemctl is-active --quiet "$ENGINE_SERVICE" || fail "$ENGINE_SERVICE debe estar activo al iniciar"
 engine_was_active=1
+if [[ -z "$ADMIN_TOKEN" ]]; then
+	TOKEN_FILE="${PROXYGO_ADMIN_TOKEN_FILE:-/var/lib/proxygo/admin.token}"
+	[[ -r "$TOKEN_FILE" ]] || fail "no se puede leer el token administrativo ($TOKEN_FILE)"
+	if ! IFS= read -r ADMIN_TOKEN < "$TOKEN_FILE" && [[ -z "$ADMIN_TOKEN" ]]; then
+		fail "el archivo de token administrativo está vacío ($TOKEN_FILE)"
+	fi
+fi
+[[ -n "$ADMIN_TOKEN" ]] || fail 'el token administrativo está vacío'
 if [[ -z "$RESTORE_MODE" ]]; then
-	mode_response="$(curl --fail --silent --show-error --max-time 3 "$CONTROL_URL/api/mode")" || fail 'no se pudo leer el modo original'
+	mode_response="$(curl --fail --silent --show-error --max-time 3 \
+		-H "Origin: $CONTROL_ORIGIN" -H "Authorization: Bearer $ADMIN_TOKEN" \
+		"$CONTROL_URL/api/mode")" || fail 'no se pudo leer el modo original'
 	mode_pattern='"mode"[[:space:]]*:[[:space:]]*"(MONITOR|SANITIZE|BLOCK)"'
 	if [[ "$mode_response" =~ $mode_pattern ]]; then
 		RESTORE_MODE="${BASH_REMATCH[1]}"

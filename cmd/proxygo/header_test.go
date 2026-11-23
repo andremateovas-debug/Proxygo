@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractCredential(t *testing.T) {
@@ -51,8 +53,8 @@ func TestHeaderMap(t *testing.T) {
 	if !foundAPIKey {
 		t.Errorf("headerMap should contain X-API-Key=key456, got %v", m)
 	}
-	if m["Cookie"] != "a=1" {
-		t.Errorf("headerMap Cookie = %q, want a=1 (first value)", m["Cookie"])
+	if m["Cookie"] != "a=1\nb=2" {
+		t.Errorf("headerMap Cookie = %q, want both values", m["Cookie"])
 	}
 }
 
@@ -146,6 +148,36 @@ func TestInspectHeadersFromMapSanitizeLeak(t *testing.T) {
 
 	if sanitized["x-api-key"] != "" {
 		t.Errorf("sanitize mode should clear leaked credential, got %q", sanitized["x-api-key"])
+	}
+}
+
+func TestInspectHeadersFromMapChecksEveryHeaderValue(t *testing.T) {
+	core := &proxyCore{}
+	core.inspectHeadersFromMap(map[string]string{"X-API-Key": "safe\nshared-secret"}, "api.example.com", modeMonitor)
+
+	findings, sanitized := core.inspectHeadersFromMap(map[string]string{"X-API-Key": "safe\nshared-secret"}, "other.example.com", modeSanitize)
+	if len(findings) != 1 || findings[0].Kind != "CREDENTIAL_LEAK" {
+		t.Fatalf("multi-value findings = %#v, want one credential leak", findings)
+	}
+	if sanitized["X-API-Key"] != "" {
+		t.Fatalf("multi-value leaked header = %q, want removed", sanitized["X-API-Key"])
+	}
+}
+
+func TestCredentialTrackingHasTTLAndCapacity(t *testing.T) {
+	now := time.Now()
+	core := &proxyCore{}
+	for index := 0; index < maxTrackedCredentials+10; index++ {
+		core.credentialHost(fmt.Sprintf("credential-%d", index), "host.example", now)
+	}
+	if got := len(core.credentials); got != maxTrackedCredentials {
+		t.Fatalf("tracked credentials = %d, want cap %d", got, maxTrackedCredentials)
+	}
+
+	expiring := &proxyCore{}
+	expiring.credentialHost("credential", "old.example", now)
+	if host, exists := expiring.credentialHost("credential", "new.example", now.Add(credentialRetention+time.Second)); exists || host != "" {
+		t.Fatalf("expired credential lookup = %q/%v, want a fresh entry", host, exists)
 	}
 }
 

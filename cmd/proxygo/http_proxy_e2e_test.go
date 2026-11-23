@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"compress/gzip"
+	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +16,16 @@ import (
 )
 
 const testAnthropicKey = "sk-ant-api03-abcdefghijklmnopqrstuvwx"
+
+type closeTrackingBody struct {
+	io.Reader
+	closed bool
+}
+
+func (body *closeTrackingBody) Close() error {
+	body.closed = true
+	return nil
+}
 
 func newPlainHTTPProxyClient(t *testing.T, core *proxyCore) *http.Client {
 	t.Helper()
@@ -36,6 +49,23 @@ func newHTTPProxyTestCore(t *testing.T, mode inspectionMode, maxBodyBytes int64)
 		inspectResponses:   true,
 		inspectHeadersFlag: true,
 		maxBodyBytes:       maxBodyBytes,
+	}
+}
+
+func TestSetResponseBodyClosesReplacedBody(t *testing.T) {
+	originalBody := &closeTrackingBody{Reader: strings.NewReader("original")}
+	response := &http.Response{Header: make(http.Header), Body: originalBody}
+	setResponseBody(response, []byte("blocked"))
+	if !originalBody.closed {
+		t.Fatal("original response body was not closed")
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if string(body) != "blocked" {
+		t.Fatalf("replacement response body = %q, want blocked", body)
 	}
 }
 
@@ -78,6 +108,192 @@ func TestPlainHTTPProxySanitizesEngineHeadersOnBothDirections(t *testing.T) {
 	if responseEvents != 1 {
 		t.Fatalf("plain HTTP response inspection events = %d, want exactly one", responseEvents)
 	}
+}
+
+func TestPlainHTTPProxyPreservesSanitizedMultipleHeaderValues(t *testing.T) {
+	gotRequestHeaders := make(chan []string, 1)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestHeaders <- r.Header.Values("X-API-Key")
+		w.Header().Add("X-API-Key", testAnthropicKey)
+		w.Header().Add("X-API-Key", "safe-response-value")
+	}))
+	defer origin.Close()
+
+	core := newHTTPProxyTestCore(t, modeSanitize, 1024)
+	client := newPlainHTTPProxyClient(t, core)
+	request, err := http.NewRequest(http.MethodGet, origin.URL+"/headers", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Add("X-API-Key", testAnthropicKey)
+	request.Header.Add("X-API-Key", "safe-request-value")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if got, want := <-gotRequestHeaders, []string{"[REDACTED_ANTHROPIC_KEY]", "safe-request-value"}; !equalStrings(got, want) {
+		t.Fatalf("origin received X-API-Key values %q, want %q", got, want)
+	}
+	if got, want := response.Header.Values("X-API-Key"), []string{"[REDACTED_ANTHROPIC_KEY]", "safe-response-value"}; !equalStrings(got, want) {
+		t.Fatalf("client received X-API-Key values %q, want %q", got, want)
+	}
+}
+
+func TestPlainHTTPProxyPreservesExactOriginPathAndQuery(t *testing.T) {
+	gotRequestURI := make(chan string, 1)
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestURI <- r.URL.RequestURI()
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer origin.Close()
+
+	core := newHTTPProxyTestCore(t, modeMonitor, 1024)
+	client := newPlainHTTPProxyClient(t, core)
+	request, err := http.NewRequest(http.MethodGet, origin.URL+"/exact/path?first=one&second=two", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if got, want := <-gotRequestURI, "/exact/path?first=one&second=two"; got != want {
+		t.Fatalf("origin request URI = %q, want %q", got, want)
+	}
+}
+
+func TestPlainHTTPProxyFailClosedResponseUses503(t *testing.T) {
+	socketPath := shortTestSocketPath(t)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		reader := bufio.NewReader(connection)
+		line, readErr := reader.ReadString('\n')
+		if readErr == nil {
+			var request InspectionRequest
+			if json.Unmarshal([]byte(line), &request) == nil {
+				payload, _ := json.Marshal(InspectionResponse{ID: request.ID, RiskLevel: "LOW", SanitizedBody: request.Body})
+				_, _ = connection.Write(append(payload, '\n'))
+			}
+		}
+		_ = connection.Close()
+		connection, acceptErr = listener.Accept()
+		if acceptErr == nil {
+			_ = connection.Close()
+		}
+	}()
+
+	originCalls := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originCalls++
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Encoding", "gzip")
+		writer := gzip.NewWriter(w)
+		_, _ = writer.Write([]byte("origin response"))
+		_ = writer.Close()
+	}))
+	defer origin.Close()
+	core := &proxyCore{
+		engine:             newUDSClientWithTimeout(socketPath, FailClosed, time.Second, log.New(io.Discard, "", 0)),
+		modes:              newActiveMode(modeMonitor),
+		events:             newEventHub(),
+		inspectRequests:    true,
+		inspectResponses:   true,
+		inspectHeadersFlag: true,
+		maxBodyBytes:       1024,
+	}
+	client := newPlainHTTPProxyClient(t, core)
+	request, err := http.NewRequest(http.MethodGet, origin.URL+"/response", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Accept-Encoding", "gzip")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || response.Status != "503 Service Unavailable" ||
+		response.Header.Get("Content-Type") != "text/plain; charset=utf-8" ||
+		string(body) != "response blocked: inspection engine unavailable\n" {
+		t.Fatalf("FAIL_CLOSED response = %d %q, want 503 inspection-unavailable", response.StatusCode, body)
+	}
+	if originCalls != 1 {
+		t.Fatalf("origin calls = %d, want one successful request before response inspection failed", originCalls)
+	}
+	responseEventFound := false
+	for _, event := range core.events.snapshot(string(modeMonitor)).Events {
+		if event.ConnectionType == "response" {
+			responseEventFound = true
+			if event.Status != "blocked" || event.Inspected {
+				t.Fatalf("response event = %#v, want blocked and inspected=false", event)
+			}
+		}
+	}
+	if !responseEventFound {
+		t.Fatal("missing blocked response inspection event")
+	}
+}
+
+func TestPlainHTTPProxyFailClosedRequestDoesNotReachOrigin(t *testing.T) {
+	originCalls := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		originCalls++
+		_, _ = w.Write([]byte("must not be reached"))
+	}))
+	defer origin.Close()
+	core := &proxyCore{
+		engine:          newUDSClientWithTimeout(shortTestSocketPath(t), FailClosed, time.Second, log.New(io.Discard, "", 0)),
+		modes:           newActiveMode(modeMonitor),
+		events:          newEventHub(),
+		securityPolicy:  AllowUninspected,
+		inspectRequests: true,
+	}
+	client := newPlainHTTPProxyClient(t, core)
+	response, err := client.Get(origin.URL + "/request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusServiceUnavailable || string(body) != "request blocked: inspection engine unavailable\n" {
+		t.Fatalf("FAIL_CLOSED request = %d %q, want 503 inspection-unavailable", response.StatusCode, body)
+	}
+	if originCalls != 0 {
+		t.Fatalf("origin calls = %d, want zero after FAIL_CLOSED inspection failure", originCalls)
+	}
+	events := core.events.snapshot(string(modeMonitor)).Events
+	if len(events) != 1 || events[0].Status != "blocked" || events[0].Inspected {
+		t.Fatalf("request event = %#v, want blocked and inspected=false", events)
+	}
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestPlainHTTPProxyResponseInspectionModes(t *testing.T) {

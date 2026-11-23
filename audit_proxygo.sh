@@ -258,6 +258,7 @@ export NO_PROXY= no_proxy=
 
 python3 - "$MOCK_PORT" <<'PY' &
 import http.server
+import json
 import sys
 
 http_port = int(sys.argv[1])
@@ -272,6 +273,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        if self.path == "/headers":
+            values = self.headers.get_all("X-API-Key", [])
+            if values == ["[REDACTED_ANTHROPIC_KEY]"]:
+                body = b"exact-single-value"
+            elif values == ["[REDACTED_ANTHROPIC_KEY]", "safe-second-value"]:
+                body = b"exact-multiple-values"
+            else:
+                body = json.dumps(values).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -354,6 +363,29 @@ if RESPONSE="$(curl --noproxy "" --connect-timeout 2 --max-time 10 -fsS \
     pass_test "sanitización de llave Anthropic"
 else
     fail_test "la llave Anthropic no fue sanitizada o el proxy no respondió"
+fi
+
+EXPECTED_API_KEY='exact-single-value'
+if RESPONSE_HEADER="$(curl --noproxy "" --connect-timeout 2 --max-time 10 -fsS \
+    --proxy "http://127.0.0.1:$PROXY_PORT" -X POST \
+    "http://127.0.0.1:$MOCK_PORT/headers" -H 'Content-Type: application/json' \
+    -H 'X-API-Key: sk-ant-api03-abcdefghijklmnopQRSTUVWX' -d '{}')" && \
+    [[ "$RESPONSE_HEADER" == "$EXPECTED_API_KEY" ]]; then
+    pass_test "motor Rust real sanea X-API-Key antes del origen"
+else
+    fail_test "el origen recibió X-API-Key inesperada: ${RESPONSE_HEADER:-sin respuesta}"
+fi
+
+EXPECTED_MULTI_API_KEY='exact-multiple-values'
+if RESPONSE_MULTI_HEADER="$(curl --noproxy "" --connect-timeout 2 --max-time 10 -fsS \
+    --proxy "http://127.0.0.1:$PROXY_PORT" -X POST \
+    "http://127.0.0.1:$MOCK_PORT/headers" -H 'Content-Type: application/json' \
+    -H 'X-API-Key: sk-ant-api03-abcdefghijklmnopQRSTUVWX' \
+    -H 'X-API-Key: safe-second-value' -d '{}')" && \
+    [[ "$RESPONSE_MULTI_HEADER" == "$EXPECTED_MULTI_API_KEY" ]]; then
+    pass_test "motor Rust real conserva y sanea cabeceras X-API-Key repetidas"
+else
+    fail_test "valores X-API-Key repetidos inesperados en el origen: ${RESPONSE_MULTI_HEADER:-sin respuesta}"
 fi
 
 if RESPONSE_NESTED="$(curl --noproxy "" --connect-timeout 2 --max-time 10 -fsS \
