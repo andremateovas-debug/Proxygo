@@ -85,12 +85,21 @@ sudo proxygo-cli ca-export /tmp/ca.crt # Exporta el certificado público de la C
 sudo proxygo-cli tui                   # Abre el dashboard interactivo en la terminal
 ```
 
-La TUI usa `PROXYGO_DASH_ADDR` (por defecto `127.0.0.1:8081`) para la API/SSE y
-`PROXYGO_PROXY_ADDR` (por defecto `127.0.0.1:8080`) para ejecutar las pruebas
-de reacción. En la TUI, `1`/`2`/`3` cambian el modo, `Tab` abre el menú, `r`
-abre las cinco pruebas de [`test_de_reaccion.md`](test_de_reaccion.md), las
-flechas seleccionan eventos y `Enter` muestra el detalle sanitizado.
+La TUI usa `PROXYGO_DASH_ADDR` (por defecto `127.0.0.1:8081`) para la API/SSE,
+`PROXYGO_PROXY_ADDR` (o `PROXY_ADDR`, por defecto `127.0.0.1:8080`) para ejecutar las pruebas
+de reacción y `PROXYGO_CA_DIR` para la prueba HTTPS MITM. En la TUI, `1`/`2`/`3` cambian el modo,
+`Tab` abre el menú (incluyendo el estado/toggle de CA), `r` abre las pruebas de
+[`test_de_reaccion.md`](test_de_reaccion.md), las flechas seleccionan eventos y `Enter`
+muestra el detalle sanitizado.
 
+> **Nota sobre `sudo` y variables de entorno:** Por defecto, `sudo` suele reiniciar las variables
+> de entorno (`env_reset`). Si reasignaste el puerto del proxy (por ejemplo a `127.0.0.1:8088`)
+> o necesitas leer `/var/lib/proxygo/ca/ca.crt` con `sudo`, pasa las variables con `sudo env` o
+> crea un script *wrapper* en `/usr/local/bin/proxygo-tui`:
+> ```bash
+> sudo env PROXYGO_PROXY_ADDR="127.0.0.1:8088" PROXY_ADDR="127.0.0.1:8088" \
+>   PROXYGO_DASH_ADDR="127.0.0.1:8081" PROXYGO_CA_DIR="/var/lib/proxygo/ca" proxygo-cli tui
+> ```
 ### Enrutar tráfico a través de ProxyGo
 Configura la variable de entorno `HTTP_PROXY` en tu terminal, script o aplicación:
 
