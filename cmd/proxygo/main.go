@@ -24,11 +24,11 @@ import (
 )
 
 const (
-	maxRequestBodyBytes = 32 << 20
-	maxEventBodyBytes   = 64 << 10
-	maxHistoryEvents    = 500
-	bucketRetentionMins = 60
-	defaultMaxBodyBytes = 32 << 20
+	maxRequestBodyBytes    = 32 << 20
+	maxEventBodyBytes      = 64 << 10
+	maxHistoryEvents       = 500
+	bucketRetentionMins    = 60
+	defaultMaxBodyBytes    = 32 << 20
 	defaultEngineTimeoutMs = 15
 )
 
@@ -43,33 +43,33 @@ const (
 type securityPolicy string
 
 const (
-	AllowUninspected securityPolicy = "ALLOW_UNINSPECTED"
-	BlockUninspected securityPolicy = "BLOCK_UNINSPECTED"
+	AllowUninspected   securityPolicy = "ALLOW_UNINSPECTED"
+	BlockUninspected   securityPolicy = "BLOCK_UNINSPECTED"
 	MonitorUninspected securityPolicy = "MONITOR_UNINSPECTED"
 )
 
 type inspectionEvent struct {
-	Seq             uint64     `json:"seq,omitempty"`
-	ID              string     `json:"id,omitempty"`
-	Timestamp       time.Time  `json:"timestamp"`
-	Method          string     `json:"method"`
-	Host            string     `json:"host"`
-	Path            string     `json:"path,omitempty"`
-	Mode            string     `json:"mode"`
-	Status          string     `json:"status"`
-	Category        string     `json:"category,omitempty"`
-	RiskLevel       string     `json:"risk_level,omitempty"`
-	Findings        []Finding  `json:"findings,omitempty"`
-	SanitizedBody   string     `json:"sanitized_body,omitempty"`
-	BodyTruncated   bool       `json:"body_truncated,omitempty"`
+	Seq              uint64            `json:"seq,omitempty"`
+	ID               string            `json:"id,omitempty"`
+	Timestamp        time.Time         `json:"timestamp"`
+	Method           string            `json:"method"`
+	Host             string            `json:"host"`
+	Path             string            `json:"path,omitempty"`
+	Mode             string            `json:"mode"`
+	Status           string            `json:"status"`
+	Category         string            `json:"category,omitempty"`
+	RiskLevel        string            `json:"risk_level,omitempty"`
+	Findings         []Finding         `json:"findings,omitempty"`
+	SanitizedBody    string            `json:"sanitized_body,omitempty"`
+	BodyTruncated    bool              `json:"body_truncated,omitempty"`
 	SanitizedHeaders map[string]string `json:"sanitized_headers,omitempty"`
-	Direction       string     `json:"direction,omitempty"`
-	Protocol        string     `json:"protocol,omitempty"`
-	Inspected       bool       `json:"inspected"`
-	ConnectionType  string     `json:"connection_type,omitempty"`
-	CertGenerated   bool       `json:"cert_generated,omitempty"`
-	TLSError        string     `json:"tls_error,omitempty"`
-	ValidationError string     `json:"validation_error,omitempty"`
+	Direction        string            `json:"direction,omitempty"`
+	Protocol         string            `json:"protocol,omitempty"`
+	Inspected        bool              `json:"inspected"`
+	ConnectionType   string            `json:"connection_type,omitempty"`
+	CertGenerated    bool              `json:"cert_generated,omitempty"`
+	TLSError         string            `json:"tls_error,omitempty"`
+	ValidationError  string            `json:"validation_error,omitempty"`
 }
 
 type minuteBucket struct {
@@ -272,7 +272,7 @@ func run() error {
 		securityPolicy:      configuredSecurityPolicy(),
 		inspectRequests:     configuredBool("PROXYGO_INSPECT_REQUESTS", true),
 		inspectResponses:    configuredBool("PROXYGO_INSPECT_RESPONSES", true),
-		inspectHeadersFlag:      configuredBool("PROXYGO_INSPECT_HEADERS", true),
+		inspectHeadersFlag:  configuredBool("PROXYGO_INSPECT_HEADERS", true),
 		blockInvalidCerts:   configuredBool("PROXYGO_BLOCK_INVALID_CERTS", true),
 		blockPrivateNetwork: configuredBool("PROXYGO_BLOCK_PRIVATE_NETWORKS", true),
 		maxBodyBytes:        configuredMaxBodyBytes(),
@@ -390,13 +390,13 @@ type proxyCore struct {
 	modes               *activeMode
 	events              *eventHub
 	credentials         sync.Map
-		securityPolicy      securityPolicy
-		inspectRequests     bool
-		inspectResponses    bool
-		inspectHeadersFlag  bool
-		blockInvalidCerts   bool
-		blockPrivateNetwork bool
-		maxBodyBytes        int64
+	securityPolicy      securityPolicy
+	inspectRequests     bool
+	inspectResponses    bool
+	inspectHeadersFlag  bool
+	blockInvalidCerts   bool
+	blockPrivateNetwork bool
+	maxBodyBytes        int64
 }
 
 type inspectionResult struct {
@@ -467,14 +467,14 @@ func (p *proxyCore) inspect(w http.ResponseWriter, r *http.Request, host string)
 func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host string) bool {
 	if !p.inspectRequests {
 		p.events.publish(inspectionEvent{
-			Timestamp:     time.Now().UTC(),
-			Method:        r.Method,
-			Host:          host,
-			Path:          r.URL.Path,
-			Mode:          string(p.modes.current()),
-			Status:        "passed",
-			Protocol:      protocolLabel(r.URL.Scheme),
-			Inspected:     false,
+			Timestamp:      time.Now().UTC(),
+			Method:         r.Method,
+			Host:           host,
+			Path:           r.URL.Path,
+			Mode:           string(p.modes.current()),
+			Status:         "passed",
+			Protocol:       protocolLabel(r.URL.Scheme),
+			Inspected:      false,
 			ConnectionType: "request",
 		})
 		return true
@@ -520,30 +520,30 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 	if inspectErr != nil {
 		if p.securityPolicy == BlockUninspected {
 			p.events.publish(inspectionEvent{
-				Timestamp:     time.Now().UTC(),
-				Method:        r.Method,
-				Host:          host,
-				Path:          path,
-				Mode:          string(mode),
-				Status:        "blocked",
-				Protocol:      protocolLabel(r.URL.Scheme),
-				Inspected:     false,
-				ConnectionType: "request",
+				Timestamp:       time.Now().UTC(),
+				Method:          r.Method,
+				Host:            host,
+				Path:            path,
+				Mode:            string(mode),
+				Status:          "blocked",
+				Protocol:        protocolLabel(r.URL.Scheme),
+				Inspected:       false,
+				ConnectionType:  "request",
 				ValidationError: inspectErr.Error(),
 			})
 			http.Error(w, "request blocked: inspection engine unavailable", http.StatusServiceUnavailable)
 			return false
 		}
 		p.events.publish(inspectionEvent{
-			Timestamp:     time.Now().UTC(),
-			Method:        r.Method,
-			Host:          host,
-			Path:          path,
-			Mode:          string(mode),
-			Status:        "engine_unavailable",
-			Protocol:      protocolLabel(r.URL.Scheme),
-			Inspected:     false,
-			ConnectionType: "request",
+			Timestamp:       time.Now().UTC(),
+			Method:          r.Method,
+			Host:            host,
+			Path:            path,
+			Mode:            string(mode),
+			Status:          "engine_unavailable",
+			Protocol:        protocolLabel(r.URL.Scheme),
+			Inspected:       false,
+			ConnectionType:  "request",
 			ValidationError: inspectErr.Error(),
 		})
 		if p.securityPolicy == MonitorUninspected {
@@ -554,14 +554,14 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 	}
 	if response == nil {
 		p.events.publish(inspectionEvent{
-			Timestamp:     time.Now().UTC(),
-			Method:        r.Method,
-			Host:          host,
-			Path:          path,
-			Mode:          string(mode),
-			Status:        "fail_open",
-			Protocol:      protocolLabel(r.URL.Scheme),
-			Inspected:     false,
+			Timestamp:      time.Now().UTC(),
+			Method:         r.Method,
+			Host:           host,
+			Path:           path,
+			Mode:           string(mode),
+			Status:         "fail_open",
+			Protocol:       protocolLabel(r.URL.Scheme),
+			Inspected:      false,
 			ConnectionType: "request",
 		})
 		return true
@@ -581,23 +581,23 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 	bodyPreview, bodyTruncated := eventBodyPreview(response.SanitizedBody)
 	headerPreview := sanitizeHeaderPreview(sanitizedHeaders)
 	p.events.publish(inspectionEvent{
-		ID:              response.ID,
-		Timestamp:       time.Now().UTC(),
-		Method:          r.Method,
-		Host:            host,
-		Path:            path,
-		Mode:            string(mode),
-		Status:          status,
-		Category:        response.Category,
-		RiskLevel:       response.RiskLevel,
-		Findings:        allFindings,
-		SanitizedBody:   bodyPreview,
-		BodyTruncated:   bodyTruncated,
+		ID:               response.ID,
+		Timestamp:        time.Now().UTC(),
+		Method:           r.Method,
+		Host:             host,
+		Path:             path,
+		Mode:             string(mode),
+		Status:           status,
+		Category:         response.Category,
+		RiskLevel:        response.RiskLevel,
+		Findings:         allFindings,
+		SanitizedBody:    bodyPreview,
+		BodyTruncated:    bodyTruncated,
 		SanitizedHeaders: headerPreview,
-		Direction:       string(directionRequest),
-		Protocol:        protocolLabel(r.URL.Scheme),
-		Inspected:       true,
-		ConnectionType:  "request",
+		Direction:        string(directionRequest),
+		Protocol:         protocolLabel(r.URL.Scheme),
+		Inspected:        true,
+		ConnectionType:   "request",
 	})
 
 	if mode == modeBlock && hasFindings {
@@ -632,14 +632,14 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 	if !p.inspectResponses {
 		p.events.publish(inspectionEvent{
-			Timestamp:     time.Now().UTC(),
-			Method:        resp.Request.Method,
-			Host:          host,
-			Path:          resp.Request.URL.Path,
-			Mode:          string(p.modes.current()),
-			Status:        "passed",
-			Protocol:      "HTTPS",
-			Inspected:     false,
+			Timestamp:      time.Now().UTC(),
+			Method:         resp.Request.Method,
+			Host:           host,
+			Path:           resp.Request.URL.Path,
+			Mode:           string(p.modes.current()),
+			Status:         "passed",
+			Protocol:       "HTTPS",
+			Inspected:      false,
 			ConnectionType: "response",
 		})
 		return nil
@@ -661,6 +661,9 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 		if err != nil {
 			return err
 		}
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		resp.ContentLength = int64(len(body))
+		resp.Header.Set("Content-Length", fmt.Sprint(resp.ContentLength))
 	}
 
 	headers := headerMap(resp.Header)
@@ -683,29 +686,29 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 	if inspectErr != nil {
 		if p.securityPolicy == BlockUninspected {
 			p.events.publish(inspectionEvent{
-				Timestamp:     time.Now().UTC(),
-				Method:        resp.Request.Method,
-				Host:          host,
-				Path:          resp.Request.URL.Path,
-				Mode:          string(mode),
-				Status:        "blocked",
-				Protocol:      "HTTPS",
-				Inspected:     false,
-				ConnectionType: "response",
+				Timestamp:       time.Now().UTC(),
+				Method:          resp.Request.Method,
+				Host:            host,
+				Path:            resp.Request.URL.Path,
+				Mode:            string(mode),
+				Status:          "blocked",
+				Protocol:        "HTTPS",
+				Inspected:       false,
+				ConnectionType:  "response",
 				ValidationError: inspectErr.Error(),
 			})
 			return inspectErr
 		}
 		p.events.publish(inspectionEvent{
-			Timestamp:     time.Now().UTC(),
-			Method:        resp.Request.Method,
-			Host:          host,
-			Path:          resp.Request.URL.Path,
-			Mode:          string(mode),
-			Status:        "engine_unavailable",
-			Protocol:      "HTTPS",
-			Inspected:     false,
-			ConnectionType: "response",
+			Timestamp:       time.Now().UTC(),
+			Method:          resp.Request.Method,
+			Host:            host,
+			Path:            resp.Request.URL.Path,
+			Mode:            string(mode),
+			Status:          "engine_unavailable",
+			Protocol:        "HTTPS",
+			Inspected:       false,
+			ConnectionType:  "response",
 			ValidationError: inspectErr.Error(),
 		})
 		if p.securityPolicy == MonitorUninspected {
@@ -715,14 +718,14 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 	}
 	if response == nil {
 		p.events.publish(inspectionEvent{
-			Timestamp:     time.Now().UTC(),
-			Method:        resp.Request.Method,
-			Host:          host,
-			Path:          resp.Request.URL.Path,
-			Mode:          string(mode),
-			Status:        "fail_open",
-			Protocol:      "HTTPS",
-			Inspected:     false,
+			Timestamp:      time.Now().UTC(),
+			Method:         resp.Request.Method,
+			Host:           host,
+			Path:           resp.Request.URL.Path,
+			Mode:           string(mode),
+			Status:         "fail_open",
+			Protocol:       "HTTPS",
+			Inspected:      false,
 			ConnectionType: "response",
 		})
 		return nil
@@ -783,6 +786,7 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 					resp.Header.Set(k, v)
 				}
 			}
+			resp.Header.Set("Content-Length", fmt.Sprint(resp.ContentLength))
 		}
 	}
 

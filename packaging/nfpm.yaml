@@ -1,7 +1,7 @@
 name: proxygo
 arch: amd64
 platform: linux
-version: 1.1.0
+version: 1.1.1
 section: net
 priority: optional
 maintainer: Andre Mateo Vasquez Mosqueda / AM Devs
