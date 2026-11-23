@@ -98,6 +98,33 @@ Accede al panel de monitoreo en tiempo real desde tu navegador en: **`http://127
 
 ---
 
+## HTTPS MITM (opcional)
+
+ProxyGo puede inspeccionar HTTPS generando su propia CA y certificados por
+dominio. Está apagado por defecto y exige una lista explícita de destinos:
+
+```bash
+sudo systemctl edit proxygo-proxy.service
+```
+
+```ini
+[Service]
+Environment="PROXYGO_MITM_ENABLED=true"
+Environment="PROXYGO_CA_ORG=Mi Organizacion"
+Environment="PROXYGO_CONNECT_ALLOWED_HOSTS=api.example.com,*.trusted.example"
+```
+
+```bash
+sudo systemctl restart proxygo-proxy.service
+sudo proxygo-cli ca-export /tmp/proxygo-ca.crt
+```
+
+Instale `proxygo-ca.crt` en los dispositivos autorizados. La guía completa de
+instalación y retirada en Ubuntu, Windows y macOS, y las variables de
+configuración, está en [docs/CA.md](docs/CA.md).
+
+---
+
 ## Solución de Problemas y Despliegue en VPS
 
 ### 1. Los servicios aparecen como `inactive` tras instalar el `.deb`

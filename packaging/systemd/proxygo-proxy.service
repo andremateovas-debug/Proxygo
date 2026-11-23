@@ -9,10 +9,14 @@ Group=proxygo
 RuntimeDirectory=proxygo
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes
+StateDirectory=proxygo
+StateDirectoryMode=0700
 UMask=0007
 Environment=PROXYGO_SOCK_PATH=/run/proxygo/engine.sock
 Environment=PROXYGO_MODE=MONITOR
 Environment=PROXYGO_FAILURE_POLICY=FAIL_CLOSED
+Environment=PROXYGO_CA_DIR=/var/lib/proxygo/ca
+Environment=PROXYGO_CONNECT_PORTS=443
 ExecStart=/usr/bin/proxygo-proxy
 Restart=always
 RestartSec=2s

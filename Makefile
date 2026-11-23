@@ -7,6 +7,7 @@ build:
 	go build -trimpath -ldflags="-s -w" -o build/proxygo-cli ./cmd/proxygo-cli
 
 test:
+	go test ./...
 	./audit_proxygo.sh
 
 deb: build

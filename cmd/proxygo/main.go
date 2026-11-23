@@ -245,7 +245,21 @@ func run() error {
 	events := newEventHub()
 	engine := newUDSClient(socketPath, policy, log.Default())
 	modes := newActiveMode(mode)
-	proxy := newHTTPProxy(engine, modes, events, proxyAddr)
+	core := &proxyCore{engine: engine, modes: modes, events: events}
+	var connect *connectHandler
+	if envBool("PROXYGO_MITM_ENABLED") {
+		cfg, err := configuredConnectConfig()
+		if err != nil {
+			return err
+		}
+		ca, err := newCertAuthority(cfg.caDir, cfg.caOrg)
+		if err != nil {
+			return fmt.Errorf("initialize CA: %w", err)
+		}
+		connect = newConnectHandler(ca, core, cfg, log.Default())
+		log.Printf("HTTPS MITM enabled (CA org=%s dir=%s ports=%v hosts=%v)", cfg.caOrg, cfg.caDir, cfg.ports, cfg.allowedHosts)
+	}
+	proxy := newHTTPProxy(core, connect, proxyAddr)
 	internal := newInternalServer(events, modes, dashAddr)
 	servers := []*http.Server{proxy, internal}
 	serveErrors := make(chan error, len(servers))
@@ -278,6 +292,9 @@ func run() error {
 			shutdownErr = err
 		}
 	}
+	if connect != nil {
+		connect.closeAll()
+	}
 	if shutdownErr != nil {
 		for _, server := range servers {
 			_ = server.Close()
@@ -306,6 +323,11 @@ func configuredAddr(envKey, fallback string) string {
 	return fallback
 }
 
+func envBool(envKey string) bool {
+	value := strings.TrimSpace(os.Getenv(envKey))
+	return value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
+}
+
 func configuredMode() (inspectionMode, error) {
 	value := strings.ToUpper(strings.TrimSpace(os.Getenv("PROXYGO_MODE")))
 	if value == "" {
@@ -332,7 +354,13 @@ func configuredFailurePolicy() (FailurePolicy, error) {
 	return policy, nil
 }
 
-func newHTTPProxy(engine *udsClient, modes *activeMode, events *eventHub, addr string) *http.Server {
+type proxyCore struct {
+	engine *udsClient
+	modes  *activeMode
+	events *eventHub
+}
+
+func newHTTPProxy(core *proxyCore, connect *connectHandler, addr string) *http.Server {
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
 			target := *request.In.URL
@@ -345,9 +373,12 @@ func newHTTPProxy(engine *udsClient, modes *activeMode, events *eventHub, addr s
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mode := modes.current()
 		if r.Method == http.MethodConnect {
-			http.Error(w, "CONNECT tunneling is not supported", http.StatusNotImplemented)
+			if connect == nil {
+				http.Error(w, "CONNECT tunneling is not supported", http.StatusNotImplemented)
+				return
+			}
+			connect.serve(w, r)
 			return
 		}
 		if r.URL.Scheme == "" || r.URL.Host == "" {
@@ -359,63 +390,8 @@ func newHTTPProxy(engine *udsClient, modes *activeMode, events *eventHub, addr s
 			return
 		}
 
-		if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch {
-			reverseProxy.ServeHTTP(w, r)
+		if !core.inspect(w, r, r.URL.Hostname()) {
 			return
-		}
-
-		var body []byte
-		if r.Body != nil {
-			var err error
-			body, err = io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
-			_ = r.Body.Close()
-			if err != nil {
-				http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
-				return
-			}
-		}
-		resetRequestBody(r, body)
-		host := r.URL.Hostname()
-		response, inspectErr := engine.Inspect(r.Context(), r.Method, host, body)
-		if inspectErr != nil {
-			events.publish(inspectionEvent{
-				Timestamp: time.Now().UTC(), Method: r.Method, Host: host,
-				Mode: string(mode), Status: "engine_unavailable",
-			})
-			http.Error(w, "inspection engine unavailable", http.StatusServiceUnavailable)
-			return
-		}
-		if response == nil {
-			events.publish(inspectionEvent{
-				Timestamp: time.Now().UTC(), Method: r.Method, Host: host,
-				Mode: string(mode), Status: "fail_open",
-			})
-			reverseProxy.ServeHTTP(w, r)
-			return
-		}
-
-		hasFindings := len(response.Findings) > 0 || strings.EqualFold(response.RiskLevel, "HIGH")
-		status := "passed"
-		if mode == modeBlock && hasFindings {
-			status = "blocked"
-		} else if mode == modeSanitize && hasFindings {
-			status = "sanitized"
-		}
-		bodyPreview, bodyTruncated := eventBodyPreview(response.SanitizedBody)
-		events.publish(inspectionEvent{
-			ID: response.ID, Timestamp: time.Now().UTC(), Method: r.Method,
-			Host: host, Mode: string(mode), Status: status,
-			Category: response.Category, RiskLevel: response.RiskLevel,
-			Findings: response.Findings,
-			SanitizedBody: bodyPreview, BodyTruncated: bodyTruncated,
-		})
-
-		if mode == modeBlock && hasFindings {
-			http.Error(w, "request blocked by DLP policy", http.StatusForbidden)
-			return
-		}
-		if mode == modeSanitize && hasFindings {
-			resetRequestBody(r, []byte(response.SanitizedBody))
 		}
 		reverseProxy.ServeHTTP(w, r)
 	})
@@ -428,6 +404,65 @@ func newHTTPProxy(engine *udsClient, modes *activeMode, events *eventHub, addr s
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
+}
+
+func (p *proxyCore) inspect(w http.ResponseWriter, r *http.Request, host string) bool {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodPatch {
+		return true
+	}
+	mode := p.modes.current()
+	var body []byte
+	if r.Body != nil {
+		var err error
+		body, err = io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBodyBytes))
+		_ = r.Body.Close()
+		if err != nil {
+			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
+			return false
+		}
+	}
+	resetRequestBody(r, body)
+	response, inspectErr := p.engine.Inspect(r.Context(), r.Method, host, body)
+	if inspectErr != nil {
+		p.events.publish(inspectionEvent{
+			Timestamp: time.Now().UTC(), Method: r.Method, Host: host,
+			Mode: string(mode), Status: "engine_unavailable",
+		})
+		http.Error(w, "inspection engine unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if response == nil {
+		p.events.publish(inspectionEvent{
+			Timestamp: time.Now().UTC(), Method: r.Method, Host: host,
+			Mode: string(mode), Status: "fail_open",
+		})
+		return true
+	}
+
+	hasFindings := len(response.Findings) > 0 || strings.EqualFold(response.RiskLevel, "HIGH")
+	status := "passed"
+	if mode == modeBlock && hasFindings {
+		status = "blocked"
+	} else if mode == modeSanitize && hasFindings {
+		status = "sanitized"
+	}
+	bodyPreview, bodyTruncated := eventBodyPreview(response.SanitizedBody)
+	p.events.publish(inspectionEvent{
+		ID: response.ID, Timestamp: time.Now().UTC(), Method: r.Method,
+		Host: host, Mode: string(mode), Status: status,
+		Category: response.Category, RiskLevel: response.RiskLevel,
+		Findings:      response.Findings,
+		SanitizedBody: bodyPreview, BodyTruncated: bodyTruncated,
+	})
+
+	if mode == modeBlock && hasFindings {
+		http.Error(w, "request blocked by DLP policy", http.StatusForbidden)
+		return false
+	}
+	if mode == modeSanitize && hasFindings {
+		resetRequestBody(r, []byte(response.SanitizedBody))
+	}
+	return true
 }
 
 func resetRequestBody(r *http.Request, body []byte) {

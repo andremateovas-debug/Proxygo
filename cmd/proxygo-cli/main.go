@@ -17,6 +17,7 @@ const (
 	engineService = "proxygo-engine.service"
 	proxyService  = "proxygo-proxy.service"
 	defaultSocket = "/run/proxygo/engine.sock"
+	defaultCADir  = "/var/lib/proxygo/ca"
 )
 
 func main() {
@@ -65,6 +66,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return usageError()
 		}
 		return printStatus(ctx, stdout)
+	case "ca-export":
+		if len(args) > 2 {
+			return usageError()
+		}
+		return exportCA(args[1:], stdout)
 	default:
 		return usageError()
 	}
@@ -127,6 +133,25 @@ func printStatus(ctx context.Context, stdout io.Writer) error {
 	return nil
 }
 
+func exportCA(args []string, stdout io.Writer) error {
+	dir := strings.TrimSpace(os.Getenv("PROXYGO_CA_DIR"))
+	if dir == "" {
+		dir = defaultCADir
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "ca.crt"))
+	if err != nil {
+		return fmt.Errorf("read CA certificate: %w", err)
+	}
+	if len(args) == 0 {
+		_, err = stdout.Write(data)
+		return err
+	}
+	if err := os.WriteFile(args[0], data, 0o644); err != nil {
+		return fmt.Errorf("write CA certificate: %w", err)
+	}
+	return os.Chmod(args[0], 0o644)
+}
+
 func usageError() error {
-	return errors.New("usage: proxygo-cli start | stop | restart [engine|proxy] | status")
+	return errors.New("usage: proxygo-cli start | stop | restart [engine|proxy] | status | ca-export [ruta]")
 }
