@@ -62,6 +62,14 @@ func TestCertAuthorityIssuesLeafWithSAN(t *testing.T) {
 	if leaf.IsCA {
 		t.Fatal("leaf certificate is marked as a CA")
 	}
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.cert)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "example.com"}); err != nil {
+		t.Fatalf("leaf does not verify for its DNS SAN: %v", err)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "attacker.example"}); err == nil {
+		t.Fatal("leaf certificate verified for an unrelated domain")
+	}
 	if leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
 		t.Fatal("leaf certificate lacks digital-signature usage")
 	}
@@ -82,19 +90,31 @@ func TestCertAuthorityIssuesLeafWithSAN(t *testing.T) {
 
 func TestCertAuthorityIssuesIPLeaf(t *testing.T) {
 	ca := newTestCA(t)
-	issued, err := ca.certificateForHost("8.8.8.8")
-	if err != nil {
-		t.Fatal(err)
-	}
-	leaf, err := x509.ParseCertificate(issued.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(leaf.IPAddresses) != 1 || !leaf.IPAddresses[0].Equal(net.ParseIP("8.8.8.8")) {
-		t.Fatalf("leaf IP SANs = %v, want [8.8.8.8]", leaf.IPAddresses)
-	}
-	if len(leaf.DNSNames) != 0 {
-		t.Fatalf("IP leaf has unexpected DNS SANs: %v", leaf.DNSNames)
+	roots := x509.NewCertPool()
+	roots.AddCert(ca.cert)
+	for _, host := range []string{"8.8.8.8", "2001:4860:4860::8888"} {
+		t.Run(host, func(t *testing.T) {
+			issued, err := ca.certificateForHost(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			leaf, err := x509.ParseCertificate(issued.Certificate[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(leaf.IPAddresses) != 1 || !leaf.IPAddresses[0].Equal(net.ParseIP(host)) {
+				t.Fatalf("leaf IP SANs = %v, want [%s]", leaf.IPAddresses, host)
+			}
+			if len(leaf.DNSNames) != 0 {
+				t.Fatalf("IP leaf has unexpected DNS SANs: %v", leaf.DNSNames)
+			}
+			if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: host}); err != nil {
+				t.Fatalf("leaf does not verify for its IP SAN: %v", err)
+			}
+			if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "attacker.example"}); err == nil {
+				t.Fatal("IP leaf certificate verified for an unrelated domain")
+			}
+		})
 	}
 }
 

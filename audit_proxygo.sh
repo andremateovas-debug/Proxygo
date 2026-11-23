@@ -391,7 +391,7 @@ else
 fi
 
 require_command "sanitización de respuestas gzip/deflate" go test -race ./cmd/proxygo -run '^TestInspectResponseCompressedSanitizationAndFraming$' -count=1
-require_command "inspección HTTPS end-to-end mediante CONNECT" go test -race ./cmd/proxygo -run '^TestMITMTunnelEndToEnd$' -count=1
+require_command "suite HTTPS MITM, CONNECT y destinos" go test -race ./cmd/proxygo -run '^(TestMITM|TestResolvePublic|TestIsPublicAddr|TestConnectHandlerRejectsBlockedDestinations|TestCertAuthorityIssues)' -count=1
 
 if python3 - "$MOCK_PORT" "$PROXY_PORT" <<'PY'
 import concurrent.futures

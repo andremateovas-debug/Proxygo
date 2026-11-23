@@ -406,6 +406,7 @@ func (h *connectHandler) serveTunnel(conn net.Conn, host string, port int, trans
 			http.Error(w, "nested CONNECT not supported", http.StatusMethodNotAllowed)
 			return
 		}
+		r.URL.Scheme = "https"
 		if !h.core.inspect(w, r, host) {
 			return
 		}
@@ -527,6 +528,12 @@ func hostAllowed(host string, allowed []string) bool {
 }
 
 func resolvePublic(ctx context.Context, host string) ([]netip.Addr, error) {
+	return resolvePublicWithLookup(ctx, host, func(ctx context.Context, host string) ([]netip.Addr, error) {
+		return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	})
+}
+
+func resolvePublicWithLookup(ctx context.Context, host string, lookup func(context.Context, string) ([]netip.Addr, error)) ([]netip.Addr, error) {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		addr = addr.Unmap()
 		if !isPublicAddr(addr) {
@@ -534,7 +541,7 @@ func resolvePublic(ctx context.Context, host string) ([]netip.Addr, error) {
 		}
 		return []netip.Addr{addr}, nil
 	}
-	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	addresses, err := lookup(ctx, host)
 	if err != nil {
 		return nil, err
 	}

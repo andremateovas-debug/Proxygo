@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -99,6 +100,8 @@ func TestIsPublicAddr(t *testing.T) {
 		{"2001:2::1", false},
 		{"fc00::1", false},
 		{"fe80::1", false},
+		{"224.0.0.1", false},
+		{"ff02::1", false},
 		{"2001:db8::1", false},
 		{"2002:7f00:1::", false},
 		{"2606:4700:4700::1111", true},
@@ -108,6 +111,38 @@ func TestIsPublicAddr(t *testing.T) {
 		if got := isPublicAddr(addr); got != test.want {
 			t.Errorf("isPublicAddr(%s) = %v, want %v", test.addr, got, test.want)
 		}
+	}
+}
+
+func TestResolvePublicRejectsBlockedIPDestinations(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "10.0.0.1", "169.254.1.1", "224.0.0.1", "ff02::1"} {
+		t.Run(host, func(t *testing.T) {
+			if _, err := resolvePublic(context.Background(), host); !errors.Is(err, errBlockedAddress) {
+				t.Fatalf("resolvePublic(%q) error = %v, want blocked-address error", host, err)
+			}
+		})
+	}
+}
+
+func TestResolvePublicRejectsPrivateDNSAnswers(t *testing.T) {
+	tests := []struct {
+		name      string
+		addresses []netip.Addr
+	}{
+		{name: "private", addresses: []netip.Addr{netip.MustParseAddr("10.1.2.3")}},
+		{name: "link-local", addresses: []netip.Addr{netip.MustParseAddr("169.254.10.20")}},
+		{name: "multicast", addresses: []netip.Addr{netip.MustParseAddr("239.1.2.3")}},
+		{name: "mixed public and private", addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("192.168.1.5")}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lookup := func(context.Context, string) ([]netip.Addr, error) {
+				return test.addresses, nil
+			}
+			if _, err := resolvePublicWithLookup(context.Background(), "origin.proxygo.test", lookup); !errors.Is(err, errBlockedAddress) {
+				t.Fatalf("private DNS answer error = %v, want blocked-address error", err)
+			}
+		})
 	}
 }
 
@@ -153,6 +188,47 @@ func TestConnectHandlerRejectsBlockedAddress(t *testing.T) {
 	handler.serve(recorder, request)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("blocked address = %d, want %d", recorder.Code, http.StatusForbidden)
+	}
+}
+
+func TestConnectHandlerRejectsBlockedDestinations(t *testing.T) {
+	tests := []struct {
+		name   string
+		host   string
+		lookup func(context.Context, string) ([]netip.Addr, error)
+	}{
+		{name: "loopback", host: "127.0.0.1"},
+		{name: "private", host: "10.20.30.40"},
+		{name: "link-local", host: "169.254.10.20"},
+		{name: "multicast", host: "239.1.2.3"},
+		{
+			name: "hostname resolving private",
+			host: "internal.proxygo.test",
+			lookup: func(ctx context.Context, host string) ([]netip.Addr, error) {
+				return resolvePublicWithLookup(ctx, host, func(context.Context, string) ([]netip.Addr, error) {
+					return []netip.Addr{netip.MustParseAddr("192.168.10.20")}, nil
+				})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := connectConfig{
+				ports:        map[int]struct{}{443: {}},
+				allowedHosts: []string{"*"},
+				maxTunnels:   1,
+				resolve:      test.lookup,
+			}
+			handler := newConnectHandler(nil, nil, cfg, log.New(io.Discard, "", 0))
+			authority := net.JoinHostPort(test.host, "443")
+			request := httptest.NewRequest(http.MethodConnect, "http://"+authority, nil)
+			request.Host = authority
+			recorder := httptest.NewRecorder()
+			handler.serve(recorder, request)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("CONNECT to blocked %s destination = %d, want 403", test.name, recorder.Code)
+			}
+		})
 	}
 }
 
