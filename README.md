@@ -4,9 +4,9 @@
 [![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Rust Version](https://img.shields.io/badge/Rust-1.78+-000000?logo=rust&logoColor=white)](https://www.rust-lang.org/)
 
-**Inspector y Firewall de Tráfico HTTP/JSON (DLP - Data Loss Prevention) con observabilidad en tiempo real.**
+**Inspector y Firewall de Tráfico HTTP/HTTPS/JSON (DLP - Data Loss Prevention) con observabilidad en tiempo real.**
 
-ProxyGo actúa como un intermediario local o en VPS que intercepta peticiones salientes hacia APIs externas (como Anthropic, OpenAI, Stripe o webhooks internos), clasifica el tráfico y evita la fuga accidental de credenciales, tokens o datos sensibles mediante expresiones regulares y cálculo de entropía de Shannon, ofreciendo un panel web ligero en tiempo real.
+ProxyGo actúa como un intermediario local o en VPS que intercepta peticiones y respuestas salientes hacia APIs externas (como Anthropic, OpenAI, Stripe o webhooks internos), clasifica el tráfico y evita la fuga accidental de credenciales, tokens o datos sensibles tanto en cuerpos JSON como en cabeceras HTTP mediante expresiones regulares y cálculo de entropía de Shannon, ofreciendo un panel web ligero en tiempo real.
 
 ---
 
@@ -16,11 +16,11 @@ ProxyGo separa el plano de red y control del motor de inspección profunda para 
 
 ```text
 [App / Script / CLI]
-        │  HTTP/JSON (127.0.0.1:8080)
+        │  HTTP / HTTPS CONNECT (127.0.0.1:8080)
         ▼
 ┌───────────────────────────────┐      SSE (:8081)      ┌─────────────────────────┐
 │     Plano de Red (Go)         │ ────────────────────▶ │  Dashboard Web          │
-│  ReverseProxy + Políticas     │                       │  HTML / CSS / Chart.js  │
+│  Proxy + MITM CA + Políticas  │                       │  HTML / CSS / Chart.js  │
 └───────────────┬───────────────┘                       └─────────────────────────┘
                 │ Unix Domain Socket (/run/proxygo/engine.sock)
                 ▼
@@ -30,20 +30,21 @@ ProxyGo separa el plano de red y control del motor de inspección profunda para 
 └───────────────────────────────┘
 ```
 
-* **Plano de Red y Control (Go):** Gestiona el proxy HTTP, aplica políticas de resiliencia (*Fail-Open* / *Fail-Closed*), recalcula cabeceras dinámicamente tras la sanitización y transmite eventos en vivo mediante *Server-Sent Events* (SSE) sirviendo el frontend embebido (`go:embed`). Por seguridad, ambos servidores escuchan estrictamente en `127.0.0.1`.
-* **Motor de Inspección DLP (Rust):** Corre como un proceso independiente comunicado por **Unix Domain Sockets (UDS)** con protocolo NDJSON. Analiza cargas útiles en microsegundos sin pausas de recolección de basura, detectando secretos conocidos y cadenas de alta entropía.
-* **Aislamiento de Fallos:** Si el motor de Rust sufre una interrupción o excede el timeout configurado (15 ms), `systemd` lo reinicia automáticamente mientras el proxy en Go mantiene el control del tráfico sin colgar las conexiones.
+* **Plano de Red y Control (Go):** Gestiona el proxy HTTP y túneles HTTPS MITM con certificados dinámicos por dominio, aplica políticas de resiliencia (*Fail-Open* / *Fail-Closed*) y de tráfico no inspeccionable, recalcula cabeceras dinámicamente tras la sanitización, conserva el estado reciente en memoria del servidor (`GET /api/state`) y transmite eventos en vivo mediante *Server-Sent Events* (SSE) sirviendo el frontend embebido (`go:embed`). Por seguridad, ambos servidores escuchan estrictamente en `127.0.0.1`.
+* **Motor de Inspección DLP (Rust):** Corre como un proceso independiente comunicado por **Unix Domain Sockets (UDS)** con protocolo NDJSON. Analiza cuerpos y cabeceras en microsegundos sin pausas de recolección de basura, detectando secretos conocidos y cadenas de alta entropía.
+* **Aislamiento de Fallos:** Si el motor de Rust sufre una interrupción o excede el timeout configurado (15 ms), `systemd` lo reinicia automáticamente mientras el proxy en Go mantiene el control del tráfico según la política configurada sin colgar las conexiones.
 
 ---
 
 ## Características Principales
 
-* **Detección Híbrida (Regex + Entropía de Shannon):** Identifica llaves de API (`sk-ant-...`, `sk-proj-...`, `AKIA...`), tokens Bearer/JWT, cadenas de conexión a bases de datos y secretos aleatorios sin prefijo conocido.
+* **Detección Híbrida (Regex + Entropía de Shannon):** Identifica llaves de API (`sk-ant-...`, `sk-proj-...`, `AKIA...`), tokens Bearer/JWT, cadenas de conexión a bases de datos y secretos aleatorios sin prefijo conocido, tanto en JSON profundamente anidado como en cabeceras HTTP.
+* **Inspección HTTPS MITM Opcional:** Genera una CA raíz ECDSA P-256 local y certificados por host en memoria, con protección SSRF contra redes privadas (`PROXYGO_BLOCK_PRIVATE_NETWORKS`) y políticas configurables para conexiones no inspeccionables (`ALLOW_UNINSPECTED`, `MONITOR_UNINSPECTED`, `BLOCK_UNINSPECTED`).
 * **Tres Modos de Operación en Caliente:**
-  * `MONITOR`: Audita, clasifica y registra el tráfico sin alterar las peticiones.
-  * `SANITIZE`: Reemplaza credenciales detectadas por etiquetas seguras (`[REDACTED_...]`) antes de que salgan a internet.
-  * `BLOCK`: Detiene la petición inmediatamente con estado `HTTP 403 Forbidden` y emite una alerta crítica.
-* **Dashboard Ligero sin Frameworks Pesados:** Interfaz web construida con HTML, CSS puro y Chart.js embebida directamente en el binario de Go.
+  * `MONITOR`: Audita, clasifica y registra el tráfico sin alterar peticiones ni respuestas.
+  * `SANITIZE`: Reemplaza credenciales detectadas por etiquetas seguras (`[REDACTED_...]`) antes de que salgan a internet o regresen al cliente.
+  * `BLOCK`: Detiene la petición o respuesta inmediatamente con estado `HTTP 403 Forbidden` y emite una alerta crítica.
+* **Dashboard Minimalista con Estado en Servidor:** Interfaz web ligera construida con HTML, CSS puro y Chart.js embebida directamente en el binario de Go. Los contadores, métricas por minuto y eventos recientes persisten en el servidor al recargar el navegador, distinguiendo tráfico HTTP/HTTPS y eventos inspeccionados, sanitizados, bloqueados o con errores TLS.
 * **Administración Integrada:** CLI (`proxygo-cli`) y unidades `systemd` endurecidas para operar ambos servicios de forma unificada.
 
 ---
@@ -54,7 +55,7 @@ ProxyGo separa el plano de red y control del motor de inspección profunda para 
 Descarga e instala el paquete `.deb` oficial desde GitHub Releases:
 
 ```bash
-curl -fsSL [https://raw.githubusercontent.com/andremateovas-debug/Proxygo/main/install.sh](https://raw.githubusercontent.com/andremateovas-debug/Proxygo/main/install.sh) | bash
+curl -fsSL https://raw.githubusercontent.com/andremateovas-debug/proxygo/main/install.sh | bash
 ```
 
 ### Opción 2: Compilación desde el código fuente
@@ -62,8 +63,8 @@ curl -fsSL [https://raw.githubusercontent.com/andremateovas-debug/Proxygo/main/i
 **Requisitos:** Go 1.22+, Rust / Cargo 1.78+ y Linux (o WSL2) para soporte nativo de Unix Domain Sockets.
 
 ```bash
-git clone [https://github.com/andremateovas-debug/Proxygo.git](https://github.com/andremateovas-debug/Proxygo.git)
-cd Proxygo
+git clone https://github.com/andremateovas-debug/proxygo.git
+cd proxygo
 
 make build
 ```
@@ -76,20 +77,21 @@ Los binarios generados quedarán en `build/proxygo-proxy`, `build/proxygo-cli` y
 
 ### Gestión de Servicios
 ```bash
-sudo proxygo-cli start            # Inicia el motor Rust y el proxy Go
-sudo proxygo-cli stop             # Detiene ambos servicios
-sudo proxygo-cli restart engine   # Reinicia solo el motor Rust sin cortar conexiones activas
-sudo proxygo-cli status           # Muestra estado de los procesos y del socket UDS
+sudo proxygo-cli start                 # Inicia el motor Rust y el proxy Go
+sudo proxygo-cli stop                  # Detiene ambos servicios
+sudo proxygo-cli restart engine        # Reinicia solo el motor Rust sin cortar conexiones activas
+sudo proxygo-cli status                # Muestra estado de los procesos y del socket UDS
+sudo proxygo-cli ca-export /tmp/ca.crt # Exporta el certificado público de la CA raíz
 ```
 
 ### Enrutar tráfico a través de ProxyGo
 Configura la variable de entorno `HTTP_PROXY` en tu terminal, script o aplicación:
 
 ```bash
-export HTTP_PROXY="[http://127.0.0.1:8080](http://127.0.0.1:8080)"
+export HTTP_PROXY="http://127.0.0.1:8080"
 
-# Ejemplo de petición auditada
-curl -x [http://127.0.0.1:8080](http://127.0.0.1:8080) -X POST [http://httpbin.org/post](http://httpbin.org/post) \
+# Ejemplo de petición HTTP auditada
+curl -x http://127.0.0.1:8080 -X POST http://httpbin.org/post \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-3-7-sonnet", "prompt": "Hola mundo"}'
 ```
@@ -100,8 +102,7 @@ Accede al panel de monitoreo en tiempo real desde tu navegador en: **`http://127
 
 ## HTTPS MITM (opcional)
 
-ProxyGo puede inspeccionar HTTPS generando su propia CA y certificados por
-dominio. Está apagado por defecto y exige una lista explícita de destinos:
+ProxyGo puede descifrar e inspeccionar tráfico HTTPS generando su propia CA y certificados por dominio. Está apagado por defecto y **exige** definir `PROXYGO_CONNECT_ALLOWED_HOSTS` (una lista explícita de dominios o `*` en entornos de prueba):
 
 ```bash
 sudo systemctl edit proxygo-proxy.service
@@ -117,11 +118,12 @@ Environment="PROXYGO_CONNECT_ALLOWED_HOSTS=api.example.com,*.trusted.example"
 ```bash
 sudo systemctl restart proxygo-proxy.service
 sudo proxygo-cli ca-export /tmp/proxygo-ca.crt
+
+# Prueba HTTPS pasando por el túnel MITM
+curl --proxy http://127.0.0.1:8080 --cacert /tmp/proxygo-ca.crt https://example.com/
 ```
 
-Instale `proxygo-ca.crt` en los dispositivos autorizados. La guía completa de
-instalación y retirada en Ubuntu, Windows y macOS, y las variables de
-configuración, está en [docs/CA.md](docs/CA.md).
+Instala `proxygo-ca.crt` únicamente en los dispositivos autorizados. La guía completa de instalación y retirada en Ubuntu, Windows y macOS, así como el detalle de variables avanzadas (`PROXYGO_SECURITY_POLICY`, `PROXYGO_INSPECT_REQUESTS`, `PROXYGO_INSPECT_RESPONSES`, `PROXYGO_INSPECT_HEADERS`, `PROXYGO_BLOCK_INVALID_CERTS`, `PROXYGO_BLOCK_PRIVATE_NETWORKS`, `PROXYGO_MAX_BODY_BYTES`), está en [docs/CA.md](docs/CA.md).
 
 ---
 
@@ -171,14 +173,15 @@ Luego abre `http://127.0.0.1:8081` en tu navegador local.
 
 ## Auditoría y Pruebas
 
-El repositorio incluye una suite automatizada para verificar la detección de fugas, sanitización de JSON anidado, concurrencia y tolerancia a fallos ante caídas del motor Rust:
+El repositorio incluye pruebas unitarias y de integración en Go y Rust, más una suite automatizada para verificar detección de fugas, sanitización de JSON anidado, túneles HTTPS MITM, concurrencia y tolerancia a fallos ante caídas del motor Rust:
 
 ```bash
-chmod +x audit_proxygo.sh
-./audit_proxygo.sh
+make test
 ```
 
-Si instalaste el paquete `.deb`, también puedes lanzar pruebas rápidas contra el proxy en ejecución con:
+*(También puedes ejecutar únicamente el script de auditoría integral con `./audit_proxygo.sh`.)*
+
+Si instalaste el paquete `.deb`, puedes lanzar pruebas rápidas contra el proxy en ejecución con:
 
 ```bash
 /usr/share/proxygo/test-anomalies.sh

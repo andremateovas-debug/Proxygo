@@ -6,7 +6,7 @@ autofirmados distintos.
 
 ## Configuración
 
-Variables de entorno del servicio `proxygo-proxy`:
+Variables de entorno del servicio `proxygo-proxy` para la CA y túneles `CONNECT`:
 
 | Variable | Por defecto | Uso |
 |---|---|---|
@@ -16,6 +16,19 @@ Variables de entorno del servicio `proxygo-proxy`:
 | `PROXYGO_CONNECT_PORTS` | `443` | Puertos permitidos para `CONNECT`, separados por coma. |
 | `PROXYGO_CONNECT_ALLOWED_HOSTS` | vacío | Hosts permitidos, separados por coma. Admite `*.example.com` y `*`. Sin lista, el arranque falla. |
 | `PROXYGO_CONNECT_MAX` | `128` | Túneles concurrentes máximos. |
+
+### Variables avanzadas de inspección y seguridad
+
+| Variable | Valores admitidos | Uso |
+|---|---|---|
+| `PROXYGO_SECURITY_POLICY` | `ALLOW_UNINSPECTED`, `MONITOR_UNINSPECTED`, `BLOCK_UNINSPECTED` | Define cómo actuar ante tráfico no inspeccionable (certificate pinning, mTLS, HTTP/2, HTTP/3/QUIC, WebSockets, SSE, contenido comprimido o certificados inválidos) y ante fallos/timeouts del motor en HTTPS. |
+| `PROXYGO_FAILURE_POLICY` | `FAIL_OPEN`, `FAIL_CLOSED` | Política cuando el motor Rust no responde o supera el timeout (en el servicio `systemd` viene fijada en `FAIL_CLOSED`). |
+| `PROXYGO_INSPECT_REQUESTS` | `true` / `false` | Activa o desactiva la inspección DLP en el cuerpo de las peticiones salientes. |
+| `PROXYGO_INSPECT_RESPONSES` | `true` / `false` | Activa o desactiva la inspección DLP en el cuerpo de las respuestas entrantes. |
+| `PROXYGO_INSPECT_HEADERS` | `true` / `false` | Activa o desactiva la inspección y sanitización de cabeceras HTTP (por ejemplo, fuga de tokens `Authorization`). |
+| `PROXYGO_BLOCK_INVALID_CERTS` | `true` / `false` | Controla el bloqueo de servidores destino con certificados TLS inválidos o expirados. |
+| `PROXYGO_BLOCK_PRIVATE_NETWORKS` | `true` / `false` | Bloquea destinos en redes privadas, loopback, link-local, multicast y rangos reservados (protección SSRF). |
+| `PROXYGO_MAX_BODY_BYTES` | entero (bytes) | Límite máximo del tamaño de cuerpo inspeccionado por petición o respuesta. |
 
 Ejemplo con systemd:
 
@@ -147,5 +160,8 @@ deben retirar la anterior y confiar en la nueva.
 - Solo se intercepta HTTP sobre TLS. Otros protocolos que usan `CONNECT` no
   funcionan.
 - Los destinos privados, loopback, link-local, multicast y rangos reservados
-  están bloqueados. El proxy no es un túnel abierto.
+  están bloqueados por defecto (`PROXYGO_BLOCK_PRIVATE_NETWORKS`). El proxy no
+  es un túnel abierto.
+- El comportamiento ante conexiones que no pueden inspeccionarse (pinning, mTLS,
+  WebSockets, SSE o fallos del motor) depende de `PROXYGO_SECURITY_POLICY`.
 - No exponga el puerto del proxy a Internet sin autenticación y firewall.
