@@ -18,10 +18,15 @@ ProxyGo separa el plano de red y control del motor de inspección profunda para 
 [App / Script / CLI]
         │  HTTP / HTTPS CONNECT (127.0.0.1:8080)
         ▼
-┌───────────────────────────────┐      SSE (:8081)      ┌─────────────────────────┐
-│     Plano de Red (Go)         │ ────────────────────▶ │  Dashboard Web          │
-│  Proxy + MITM CA + Políticas  │                       │  HTML / CSS / Chart.js  │
-└───────────────┬───────────────┘                       └─────────────────────────┘
+┌───────────────────────────────┐  API / SSE (:8081)  ┌─────────────────────────┐
+│     Plano de Red (Go)         │ ──────────────────▶ │  Dashboard Web          │
+│  Proxy + MITM CA + Políticas  │                     │  HTML / CSS / Chart.js  │
+└───────────────┬───────────────┘                     └─────────────────────────┘
+                │
+                ├───────────────────────────────────▶ ┌─────────────────────────┐
+                │          API / SSE (:8081)           │  TUI de consola          │
+                │                                      │  proxygo-cli             │
+                │                                      └─────────────────────────┘
                 │ Unix Domain Socket (/run/proxygo/engine.sock)
                 ▼
 ┌───────────────────────────────┐
