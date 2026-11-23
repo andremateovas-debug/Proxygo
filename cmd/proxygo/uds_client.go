@@ -80,7 +80,7 @@ func newUDSClientWithTimeout(socketPath string, policy FailurePolicy, timeout ti
 // A fresh connection avoids sharing framed request/response streams across callers.
 func (c *udsClient) Inspect(ctx context.Context, request InspectionRequest) (*InspectionResponse, error) {
 	if len(request.Body) > maxInspectBodyBytes {
-		request.Body = request.Body[:maxInspectBodyBytes]
+		return nil, fmt.Errorf("inspection body exceeds %d-byte engine limit", maxInspectBodyBytes)
 	}
 
 	response, err := c.roundTrip(ctx, request)

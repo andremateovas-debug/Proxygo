@@ -28,7 +28,16 @@ Variables de entorno del servicio `proxygo-proxy` para la CA y túneles `CONNECT
 | `PROXYGO_INSPECT_HEADERS` | `true` / `false` | Activa o desactiva la inspección y sanitización de cabeceras HTTP (por ejemplo, fuga de tokens `Authorization`). |
 | `PROXYGO_BLOCK_INVALID_CERTS` | `true` / `false` | Controla el bloqueo de servidores destino con certificados TLS inválidos o expirados. |
 | `PROXYGO_BLOCK_PRIVATE_NETWORKS` | `true` / `false` | Bloquea destinos en redes privadas, loopback, link-local, multicast y rangos reservados (protección SSRF). |
-| `PROXYGO_MAX_BODY_BYTES` | entero (bytes) | Límite máximo del tamaño de cuerpo inspeccionado por petición o respuesta. |
+| `PROXYGO_MAX_BODY_BYTES` | entero (bytes) | Límite máximo solicitado para inspeccionar cada cuerpo. El motor NDJSON admite hasta 1 MiB por cuerpo; el límite efectivo es el menor entre ambos. |
+
+Los cuerpos que superan el límite se detectan leyendo como máximo un byte
+adicional y no se envían al motor como si estuvieran completos. En modo
+`MONITOR` se retransmiten intactos y el evento queda marcado como
+`body_too_large` con `inspected=false`. En modos `BLOCK` y `SANITIZE` se
+bloquean, ya que el proxy no puede confirmar que el cuerpo completo esté libre
+de secretos ni afirmar que lo saneó. Los errores de lectura también quedan
+registrados como cuerpos no inspeccionados. El resto del cuerpo se mantiene en
+streaming y no se carga completo en memoria.
 
 Ejemplo con systemd:
 

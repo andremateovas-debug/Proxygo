@@ -29,6 +29,7 @@ const (
 	maxHistoryEvents       = 500
 	bucketRetentionMins    = 60
 	defaultMaxBodyBytes    = 32 << 20
+	maxEngineBodyBytes     = int64(maxInspectBodyBytes)
 	defaultEngineTimeoutMs = 15
 )
 
@@ -146,7 +147,7 @@ func (h *eventHub) unsubscribe(ch chan []byte) {
 
 func isAlertEvent(event inspectionEvent) bool {
 	switch strings.ToLower(event.Status) {
-	case "blocked", "sanitized", "engine_unavailable":
+	case "blocked", "sanitized", "engine_unavailable", "body_too_large", "body_read_error":
 		return true
 	}
 	return strings.EqualFold(event.RiskLevel, "HIGH") || len(event.Findings) > 0
@@ -439,6 +440,111 @@ const (
 	directionResponse inspectionDirection = "RESPONSE"
 )
 
+type boundedBodyRead struct {
+	body      []byte
+	replay    io.ReadCloser
+	tooLarge  bool
+	readError error
+}
+
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
+type errorThenReader struct {
+	err    error
+	reader io.Reader
+	done   bool
+}
+
+func (r *errorThenReader) Read(data []byte) (int, error) {
+	if !r.done {
+		r.done = true
+		return 0, r.err
+	}
+	return r.reader.Read(data)
+}
+
+func inspectionBodyLimit(configured int64) int64 {
+	if configured <= 0 {
+		configured = defaultMaxBodyBytes
+	}
+	if configured > maxEngineBodyBytes {
+		return maxEngineBodyBytes
+	}
+	return configured
+}
+
+func readBoundedBody(body io.ReadCloser, maxBytes int64) boundedBodyRead {
+	if body == nil {
+		return boundedBodyRead{}
+	}
+
+	data, readErr := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	result := boundedBodyRead{
+		body:      data,
+		tooLarge:  int64(len(data)) > maxBytes,
+		readError: readErr,
+	}
+	if readErr != nil {
+		replay := io.MultiReader(bytes.NewReader(data), &errorThenReader{err: readErr, reader: body})
+		result.replay = readCloser{Reader: replay, Closer: body}
+		return result
+	}
+	if result.tooLarge {
+		result.replay = readCloser{Reader: io.MultiReader(bytes.NewReader(data), body), Closer: body}
+		return result
+	}
+
+	_ = body.Close()
+	result.replay = io.NopCloser(bytes.NewReader(data))
+	return result
+}
+
+func incompleteBodyReason(result boundedBodyRead, maxBytes int64) (string, string) {
+	if result.tooLarge {
+		return "body_too_large", fmt.Sprintf("body exceeds inspection limit of %d bytes", maxBytes)
+	}
+	return "body_read_error", fmt.Sprintf("body read failed: %v", result.readError)
+}
+
+func (p *proxyCore) blockIncompleteBody(mode inspectionMode) bool {
+	return mode == modeBlock || mode == modeSanitize
+}
+
+func setRequestBody(r *http.Request, body []byte) {
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	r.ContentLength = int64(len(body))
+	r.TransferEncoding = nil
+	r.Header.Set("Content-Length", fmt.Sprint(len(body)))
+	r.Header.Del("Transfer-Encoding")
+	r.Header.Del("Expect")
+}
+
+func syncRequestBodyLength(r *http.Request) {
+	r.Header.Set("Content-Length", fmt.Sprint(r.ContentLength))
+	r.TransferEncoding = nil
+	r.Header.Del("Transfer-Encoding")
+}
+
+func setResponseBody(resp *http.Response, body []byte) {
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	syncResponseBodyFraming(resp)
+}
+
+func syncResponseBodyFraming(resp *http.Response) {
+	resp.TransferEncoding = nil
+	resp.Header.Set("Content-Length", fmt.Sprint(resp.ContentLength))
+	resp.Header.Del("Transfer-Encoding")
+	resp.Header.Del("Content-Encoding")
+	resp.Header.Del("Content-Range")
+}
+
 func newHTTPProxy(core *proxyCore, connect *connectHandler, addr string) *http.Server {
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
@@ -511,22 +617,46 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 
 	mode := p.modes.current()
 
-	maxBytes := p.maxBodyBytes
-	if maxBytes <= 0 {
-		maxBytes = defaultMaxBodyBytes
-	}
+	maxBytes := inspectionBodyLimit(p.maxBodyBytes)
 
 	var body []byte
 	if r.Body != nil {
-		var err error
-		body, err = io.ReadAll(io.LimitReader(r.Body, maxBytes))
-		_ = r.Body.Close()
-		if err != nil {
-			http.Error(w, "request body too large or unreadable", http.StatusRequestEntityTooLarge)
-			return false
+		read := readBoundedBody(r.Body, maxBytes)
+		r.Body = read.replay
+		if read.tooLarge || read.readError != nil {
+			eventStatus, reason := incompleteBodyReason(read, maxBytes)
+			blocked := p.blockIncompleteBody(mode)
+			if blocked {
+				eventStatus = "blocked"
+			}
+			p.events.publish(inspectionEvent{
+				Timestamp:       time.Now().UTC(),
+				Method:          r.Method,
+				Host:            host,
+				Path:            r.URL.Path,
+				Mode:            string(mode),
+				Status:          eventStatus,
+				Protocol:        protocolLabel(r.URL.Scheme),
+				Inspected:       false,
+				ConnectionType:  "request",
+				ValidationError: reason,
+			})
+			if blocked {
+				_ = r.Body.Close()
+				statusCode := http.StatusBadRequest
+				if read.tooLarge {
+					statusCode = http.StatusRequestEntityTooLarge
+				}
+				http.Error(w, "request blocked: body was not fully inspected", statusCode)
+				return false
+			}
+			return true
 		}
+		body = read.body
 	}
-	resetRequestBody(r, body)
+	if r.Body != nil {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+	}
 
 	headers := headerMap(r.Header)
 	path := r.URL.Path
@@ -635,8 +765,10 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 	}
 
 	if mode == modeSanitize && hasFindings {
+		bodyReplaced := false
 		if response.SanitizedBody != "" {
 			resetRequestBody(r, []byte(response.SanitizedBody))
+			bodyReplaced = true
 		}
 		if p.inspectHeadersFlag {
 			for k, v := range sanitizedHeaders {
@@ -649,9 +781,13 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 			if _, ok := sanitizedHeaders["Content-Length"]; ok {
 				r.Header.Set("Content-Length", sanitizedHeaders["Content-Length"])
 			} else if len(sanitizedHeaders) > 0 {
-				r.Header.Del("Content-Length")
-				r.Header.Del("Transfer-Encoding")
+				if bodyReplaced {
+					r.Header.Set("Content-Length", fmt.Sprint(r.ContentLength))
+				}
 			}
+		}
+		if bodyReplaced {
+			syncRequestBodyLength(r)
 		}
 	}
 
@@ -676,23 +812,35 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 
 	mode := p.modes.current()
 
-	maxBytes := p.maxBodyBytes
-	if maxBytes <= 0 {
-		maxBytes = defaultMaxBodyBytes
-	}
+	maxBytes := inspectionBodyLimit(p.maxBodyBytes)
 
 	var body []byte
 	if resp.Body != nil {
-		var err error
-		limited := io.LimitReader(resp.Body, maxBytes)
-		body, err = io.ReadAll(limited)
-		_ = resp.Body.Close()
-		if err != nil {
-			return err
+		read := readBoundedBody(resp.Body, maxBytes)
+		resp.Body = read.replay
+		if read.tooLarge || read.readError != nil {
+			eventStatus, reason := incompleteBodyReason(read, maxBytes)
+			blocked := p.blockIncompleteBody(mode)
+			if blocked {
+				eventStatus = "blocked"
+				setResponseBody(resp, []byte("response blocked: body was not fully inspected\n"))
+				resp.StatusCode = http.StatusForbidden
+			}
+			p.events.publish(inspectionEvent{
+				Timestamp:       time.Now().UTC(),
+				Method:          resp.Request.Method,
+				Host:            host,
+				Path:            resp.Request.URL.Path,
+				Mode:            string(mode),
+				Status:          eventStatus,
+				Protocol:        "HTTPS",
+				Inspected:       false,
+				ConnectionType:  "response",
+				ValidationError: reason,
+			})
+			return nil
 		}
-		resp.Body = io.NopCloser(bytes.NewReader(body))
-		resp.ContentLength = int64(len(body))
-		resp.Header.Set("Content-Length", fmt.Sprint(resp.ContentLength))
+		body = read.body
 	}
 
 	headers := headerMap(resp.Header)
@@ -795,17 +943,15 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 
 	if mode == modeBlock && hasFindings {
 		resp.StatusCode = http.StatusForbidden
-		resp.Body = io.NopCloser(bytes.NewReader([]byte("response blocked by DLP policy\n")))
-		resp.ContentLength = int64(len([]byte("response blocked by DLP policy\n")))
-		resp.Header.Set("Content-Length", fmt.Sprint(resp.ContentLength))
+		setResponseBody(resp, []byte("response blocked by DLP policy\n"))
 		return nil
 	}
 
 	if mode == modeSanitize && hasFindings {
+		bodyReplaced := false
 		if response.SanitizedBody != "" && !isCompressed(resp) {
-			resp.Body = io.NopCloser(bytes.NewReader([]byte(response.SanitizedBody)))
-			resp.ContentLength = int64(len(response.SanitizedBody))
-			resp.Header.Set("Content-Length", fmt.Sprint(resp.ContentLength))
+			setResponseBody(resp, []byte(response.SanitizedBody))
+			bodyReplaced = true
 		}
 		if p.inspectHeadersFlag {
 			for k, v := range sanitizedHeaders {
@@ -815,7 +961,9 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 					resp.Header.Set(k, v)
 				}
 			}
-			resp.Header.Set("Content-Length", fmt.Sprint(resp.ContentLength))
+			if bodyReplaced {
+				syncResponseBodyFraming(resp)
+			}
 		}
 	}
 
@@ -945,14 +1093,7 @@ func isCompressed(resp *http.Response) bool {
 }
 
 func resetRequestBody(r *http.Request, body []byte) {
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	r.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(body)), nil
-	}
-	r.ContentLength = int64(len(body))
-	r.Header.Set("Content-Length", fmt.Sprint(len(body)))
-	r.Header.Del("Transfer-Encoding")
-	r.Header.Del("Expect")
+	setRequestBody(r, body)
 }
 
 func newInternalServer(events *eventHub, modes *activeMode, addr string, controllers ...*mitmController) *http.Server {
