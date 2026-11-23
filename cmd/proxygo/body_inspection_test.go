@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"errors"
 	"io"
 	"log"
@@ -285,4 +288,296 @@ func TestReadBoundedBodyReportsAndReplaysReadError(t *testing.T) {
 	if err != nil || string(second) != "tail" {
 		t.Fatalf("remainder after read error = %q, err=%v", second, err)
 	}
+}
+
+func TestInspectRequestGzipBody(t *testing.T) {
+	core := newBodyInspectionTestCore(t, modeMonitor, 8)
+	var b bytes.Buffer
+	writer := gzip.NewWriter(&b)
+	if _, err := io.Copy(writer, strings.NewReader("12345678")); err != nil {
+		t.Fatalf("compress body: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	original := append([]byte(nil), b.Bytes()...)
+	request := httptest.NewRequest(http.MethodPost, "http://example.test/path", bytes.NewReader(original))
+	request.Header.Set("Content-Encoding", "gzip")
+	request.ContentLength = int64(len(original))
+
+	if !core.inspectRequest(httptest.NewRecorder(), request, "example.test") {
+		t.Fatal("MONITOR unexpectedly blocked the request")
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil || !bytes.Equal(body, original) {
+		t.Fatalf("forwarded gzip request body changed: got %x want %x, err=%v", body, original, err)
+	}
+}
+
+func TestInspectResponseGzipBody(t *testing.T) {
+	core := newBodyInspectionTestCore(t, modeMonitor, 8)
+	var b bytes.Buffer
+	writer := gzip.NewWriter(&b)
+	if _, err := io.Copy(writer, strings.NewReader("12345678")); err != nil {
+		t.Fatalf("compress body: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close gzip writer: %v", err)
+	}
+	original := append([]byte(nil), b.Bytes()...)
+	response := &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(bytes.NewReader(original)),
+		ContentLength: int64(len(original)),
+		Request:       httptest.NewRequest(http.MethodGet, "https://example.test/path", nil),
+	}
+	response.Header.Set("Content-Encoding", "gzip")
+	response.Header.Set("Content-Length", strconv.Itoa(len(original)))
+
+	if err := core.inspectResponse(response, "example.test"); err != nil {
+		t.Fatalf("inspect response: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil || !bytes.Equal(body, original) {
+		t.Fatalf("forwarded gzip body changed: got %x want %x, err=%v", body, original, err)
+	}
+	if event := lastInspectionEvent(t, core); event.Status != "passed" || !event.Inspected {
+		t.Fatalf("event status/inspected = %q/%v", event.Status, event.Inspected)
+	}
+}
+
+func TestInspectRequestZlibBody(t *testing.T) {
+	core := newBodyInspectionTestCore(t, modeMonitor, 8)
+	var b bytes.Buffer
+	writer := zlib.NewWriter(&b)
+	if _, err := io.Copy(writer, strings.NewReader("12345678")); err != nil {
+		t.Fatalf("compress body: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close zlib writer: %v", err)
+	}
+	original := append([]byte(nil), b.Bytes()...)
+	request := httptest.NewRequest(http.MethodPost, "http://example.test/path", bytes.NewReader(original))
+	request.Header.Set("Content-Encoding", "deflate")
+	request.ContentLength = int64(len(original))
+
+	if !core.inspectRequest(httptest.NewRecorder(), request, "example.test") {
+		t.Fatal("MONITOR unexpectedly blocked the request")
+	}
+	body, err := io.ReadAll(request.Body)
+	if err != nil || !bytes.Equal(body, original) {
+		t.Fatalf("forwarded deflate request body changed: got %x want %x, err=%v", body, original, err)
+	}
+}
+
+func TestInspectResponseZlibBody(t *testing.T) {
+	core := newBodyInspectionTestCore(t, modeMonitor, 8)
+	var b bytes.Buffer
+	writer := zlib.NewWriter(&b)
+	if _, err := io.Copy(writer, strings.NewReader("12345678")); err != nil {
+		t.Fatalf("compress body: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close zlib writer: %v", err)
+	}
+	original := append([]byte(nil), b.Bytes()...)
+	response := &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(bytes.NewReader(original)),
+		ContentLength: int64(len(original)),
+		Request:       httptest.NewRequest(http.MethodGet, "https://example.test/path", nil),
+	}
+	response.Header.Set("Content-Encoding", "deflate")
+	response.Header.Set("Content-Length", strconv.Itoa(len(original)))
+
+	if err := core.inspectResponse(response, "example.test"); err != nil {
+		t.Fatalf("inspect response: %v", err)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil || !bytes.Equal(body, original) {
+		t.Fatalf("forwarded deflate body changed: got %x want %x, err=%v", body, original, err)
+	}
+	if event := lastInspectionEvent(t, core); event.Status != "passed" || !event.Inspected {
+		t.Fatalf("event status/inspected = %q/%v", event.Status, event.Inspected)
+	}
+}
+
+func gzipTestBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	writer := gzip.NewWriter(&b)
+	if _, err := writer.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return append([]byte(nil), b.Bytes()...)
+}
+
+func deflateTestBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	writer := zlib.NewWriter(&b)
+	if _, err := writer.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return append([]byte(nil), b.Bytes()...)
+}
+
+func gunzipTestBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decompressed, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return decompressed
+}
+
+func unzipTestBytes(t *testing.T, data []byte) []byte {
+	t.Helper()
+	reader, err := zlib.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decompressed, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return decompressed
+}
+
+func TestInspectResponseCompressedSanitizationAndFraming(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		encoding   string
+		compress   func(*testing.T, []byte) []byte
+		decompress func(*testing.T, []byte) []byte
+	}{
+		{name: "gzip", encoding: "gzip", compress: gzipTestBytes, decompress: gunzipTestBytes},
+		{name: "deflate", encoding: "deflate", compress: deflateTestBytes, decompress: unzipTestBytes},
+	} {
+		t.Run(test.name+" secret", func(t *testing.T) {
+			core := newBodyInspectionTestCore(t, modeSanitize, 1024)
+			original := test.compress(t, []byte("prefix SECRET suffix"))
+			response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(original)), ContentLength: int64(len(original)), Request: httptest.NewRequest(http.MethodGet, "https://example.test/path", nil)}
+			response.Header.Set("Content-Encoding", test.encoding)
+			response.Header.Set("Content-Length", strconv.Itoa(len(original)))
+			response.Header.Set("Transfer-Encoding", "chunked")
+			response.TransferEncoding = []string{"chunked"}
+
+			if err := core.inspectResponse(response, "example.test"); err != nil {
+				t.Fatal(err)
+			}
+			wire, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(test.decompress(t, wire))
+			if got != "prefix [REDACTED] suffix" {
+				t.Fatalf("decompressed body = %q", got)
+			}
+			if response.Header.Get("Content-Encoding") != test.encoding {
+				t.Fatalf("Content-Encoding = %q", response.Header.Get("Content-Encoding"))
+			}
+			if response.Header.Get("Content-Length") != strconv.Itoa(len(wire)) || response.ContentLength != int64(len(wire)) {
+				t.Fatalf("framing length=%d header=%q", response.ContentLength, response.Header.Get("Content-Length"))
+			}
+			if len(response.TransferEncoding) != 0 || response.Header.Get("Transfer-Encoding") != "" {
+				t.Fatalf("Transfer-Encoding remained: %v / %q", response.TransferEncoding, response.Header.Get("Transfer-Encoding"))
+			}
+			if event := lastInspectionEvent(t, core); event.Status != "sanitized" || !event.Inspected {
+				t.Fatalf("event status/inspected = %q/%v", event.Status, event.Inspected)
+			}
+		})
+
+		t.Run(test.name+" no secret", func(t *testing.T) {
+			core := newBodyInspectionTestCore(t, modeSanitize, 1024)
+			original := test.compress(t, []byte("ordinary public content"))
+			response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(original)), ContentLength: int64(len(original)), Request: httptest.NewRequest(http.MethodGet, "https://example.test/path", nil)}
+			response.Header.Set("Content-Encoding", test.encoding)
+			response.Header.Set("Content-Length", strconv.Itoa(len(original)))
+			if err := core.inspectResponse(response, "example.test"); err != nil {
+				t.Fatal(err)
+			}
+			wire, err := io.ReadAll(response.Body)
+			if err != nil || !bytes.Equal(wire, original) {
+				t.Fatalf("unchanged compressed body was modified: got %x want %x", wire, original)
+			}
+			if event := lastInspectionEvent(t, core); event.Status == "sanitized" || !event.Inspected {
+				t.Fatalf("event status/inspected = %q/%v", event.Status, event.Inspected)
+			}
+		})
+	}
+}
+
+func TestInspectResponseCompressedFailuresPreserveBody(t *testing.T) {
+	t.Run("corrupt gzip", func(t *testing.T) {
+		core := newBodyInspectionTestCore(t, modeSanitize, 1024)
+		original := []byte("not-a-valid-gzip-stream")
+		response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(original)), ContentLength: int64(len(original)), Request: httptest.NewRequest(http.MethodGet, "https://example.test/path", nil)}
+		response.Header.Set("Content-Encoding", "gzip")
+		if err := core.inspectResponse(response, "example.test"); err != nil {
+			t.Fatal(err)
+		}
+		wire, _ := io.ReadAll(response.Body)
+		if string(wire) != "response blocked: body was not fully inspected\n" {
+			t.Fatalf("corrupt body replacement = %q", wire)
+		}
+		if event := lastInspectionEvent(t, core); event.Status != "blocked" || event.Inspected {
+			t.Fatalf("event status/inspected = %q/%v", event.Status, event.Inspected)
+		}
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403", response.StatusCode)
+		}
+	})
+
+	t.Run("unsupported brotli", func(t *testing.T) {
+		core := newBodyInspectionTestCore(t, modeMonitor, 1024)
+		original := []byte("brotli-wire-data")
+		response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(original)), ContentLength: int64(len(original)), Request: httptest.NewRequest(http.MethodGet, "https://example.test/path", nil)}
+		response.Header.Set("Content-Encoding", "br")
+		if err := core.inspectResponse(response, "example.test"); err != nil {
+			t.Fatal(err)
+		}
+		wire, _ := io.ReadAll(response.Body)
+		if !bytes.Equal(wire, original) {
+			t.Fatalf("unsupported body changed: got %q want %q", wire, original)
+		}
+		if event := lastInspectionEvent(t, core); event.Status != "unsupported_encoding" || event.Inspected {
+			t.Fatalf("event status/inspected = %q/%v", event.Status, event.Inspected)
+		}
+	})
+
+	t.Run("decompression bomb", func(t *testing.T) {
+		core := newBodyInspectionTestCore(t, modeMonitor, 32)
+		original := gzipTestBytes(t, bytes.Repeat([]byte("A"), 1024))
+		response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(original)), ContentLength: int64(len(original)), Request: httptest.NewRequest(http.MethodGet, "https://example.test/path", nil)}
+		response.Header.Set("Content-Encoding", "gzip")
+		if err := core.inspectResponse(response, "example.test"); err != nil {
+			t.Fatal(err)
+		}
+		wire, _ := io.ReadAll(response.Body)
+		if !bytes.Equal(wire, original) {
+			t.Fatalf("oversized decompressed body changed")
+		}
+		if event := lastInspectionEvent(t, core); event.Status != "body_too_large" || event.Inspected {
+			t.Fatalf("event status/inspected = %q/%v", event.Status, event.Inspected)
+		}
+	})
 }

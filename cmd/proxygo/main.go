@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -740,14 +743,50 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 	allFindings := append(response.Findings, headerFindings...)
 	hasFindings := len(allFindings) > 0 || strings.EqualFold(response.RiskLevel, "HIGH")
 
+	bodyReplaced := false
+	headerReplaced := false
+	if mode == modeBlock && hasFindings {
+		http.Error(w, "request blocked by DLP policy", http.StatusForbidden)
+		return false
+	} else if mode == modeSanitize && hasFindings {
+		if response.SanitizedBody != "" && response.SanitizedBody != string(body) {
+			setRequestBody(r, []byte(response.SanitizedBody))
+			bodyReplaced = true
+		}
+		if p.inspectHeadersFlag {
+			for k, v := range sanitizedHeaders {
+				if k == "Content-Encoding" || k == "Content-Length" || k == "Transfer-Encoding" {
+					continue
+				}
+				if v == "" {
+					if r.Header.Get(k) != "" {
+						headerReplaced = true
+					}
+					r.Header.Del(k)
+				} else if r.Header.Get(k) != v {
+					headerReplaced = true
+					r.Header.Set(k, v)
+				}
+			}
+			if bodyReplaced {
+				syncRequestBodyLength(r)
+			}
+		}
+	}
+
 	status := "passed"
 	if mode == modeBlock && hasFindings {
 		status = "blocked"
-	} else if mode == modeSanitize && hasFindings {
+	} else if mode == modeSanitize && (bodyReplaced || headerReplaced) {
 		status = "sanitized"
 	}
 
-	bodyPreview, bodyTruncated := eventBodyPreview(response.SanitizedBody)
+	sanitizedPreview := ""
+	bodyPreview, bodyTruncated := "", false
+	if bodyReplaced {
+		bodyPreview, bodyTruncated = eventBodyPreview(response.SanitizedBody)
+		sanitizedPreview = bodyPreview
+	}
 	headerPreview := sanitizeHeaderPreview(sanitizedHeaders)
 	p.events.publish(inspectionEvent{
 		ID:               response.ID,
@@ -760,7 +799,7 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 		Category:         response.Category,
 		RiskLevel:        response.RiskLevel,
 		Findings:         allFindings,
-		SanitizedBody:    bodyPreview,
+		SanitizedBody:    sanitizedPreview,
 		BodyTruncated:    bodyTruncated,
 		SanitizedHeaders: headerPreview,
 		Direction:        string(directionRequest),
@@ -768,38 +807,6 @@ func (p *proxyCore) inspectRequest(w http.ResponseWriter, r *http.Request, host 
 		Inspected:        true,
 		ConnectionType:   "request",
 	})
-
-	if mode == modeBlock && hasFindings {
-		http.Error(w, "request blocked by DLP policy", http.StatusForbidden)
-		return false
-	}
-
-	if mode == modeSanitize && hasFindings {
-		bodyReplaced := false
-		if response.SanitizedBody != "" {
-			resetRequestBody(r, []byte(response.SanitizedBody))
-			bodyReplaced = true
-		}
-		if p.inspectHeadersFlag {
-			for k, v := range sanitizedHeaders {
-				if v == "" {
-					r.Header.Del(k)
-				} else {
-					r.Header.Set(k, v)
-				}
-			}
-			if _, ok := sanitizedHeaders["Content-Length"]; ok {
-				r.Header.Set("Content-Length", sanitizedHeaders["Content-Length"])
-			} else if len(sanitizedHeaders) > 0 {
-				if bodyReplaced {
-					r.Header.Set("Content-Length", fmt.Sprint(r.ContentLength))
-				}
-			}
-		}
-		if bodyReplaced {
-			syncRequestBodyLength(r)
-		}
-	}
 
 	return true
 }
@@ -824,12 +831,18 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 
 	maxBytes := inspectionBodyLimit(p.maxBodyBytes)
 
+	encoding, compressed := compressedResponseEncoding(resp)
+	wireLimit := maxBytes
+	if compressed {
+		wireLimit = maxEngineBodyBytes
+	}
+
 	var body []byte
 	if resp.Body != nil {
-		read := readBoundedBody(resp.Body, maxBytes)
+		read := readBoundedBody(resp.Body, wireLimit)
 		resp.Body = read.replay
 		if read.tooLarge || read.readError != nil {
-			eventStatus, reason := incompleteBodyReason(read, maxBytes)
+			eventStatus, reason := incompleteBodyReason(read, wireLimit)
 			blocked := p.blockIncompleteBody(mode)
 			if blocked {
 				eventStatus = "blocked"
@@ -851,6 +864,24 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 			return nil
 		}
 		body = read.body
+	}
+
+	if compressed {
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		if !supportedCompressedResponseEncoding(encoding) {
+			incompletelyInspectedResponse(p, resp, host, "unsupported_encoding", fmt.Sprintf("unsupported Content-Encoding %q", encoding), mode)
+			return nil
+		}
+		decompressed, tooLarge, err := decompressResponseBody(body, encoding, maxBytes)
+		if tooLarge {
+			incompletelyInspectedResponse(p, resp, host, "body_too_large", fmt.Sprintf("decompressed body exceeds inspection limit of %d bytes", maxBytes), mode)
+			return nil
+		}
+		if err != nil {
+			incompletelyInspectedResponse(p, resp, host, "decompression_error", fmt.Sprintf("failed to decompress %s response body: %v", encoding, err), mode)
+			return nil
+		}
+		body = decompressed
 	}
 
 	headers := headerMap(resp.Header)
@@ -922,14 +953,63 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 	allFindings := append(response.Findings, headerFindings...)
 	hasFindings := len(allFindings) > 0 || strings.EqualFold(response.RiskLevel, "HIGH")
 
+	bodyReplaced := false
+	headerReplaced := false
+	if mode == modeBlock && hasFindings {
+		resp.StatusCode = http.StatusForbidden
+		setResponseBody(resp, []byte("response blocked by DLP policy\n"))
+	} else if mode == modeSanitize && hasFindings {
+		if response.SanitizedBody != "" && response.SanitizedBody != string(body) {
+			if compressed {
+				compressedBody, compressErr := compressResponseBody([]byte(response.SanitizedBody), encoding)
+				if compressErr != nil {
+					p.events.publish(inspectionEvent{
+						Timestamp: time.Now().UTC(), Method: resp.Request.Method, Host: host, Path: resp.Request.URL.Path,
+						Mode: string(mode), Status: "recompression_error", Protocol: "HTTPS", Inspected: false,
+						ConnectionType: "response", ValidationError: compressErr.Error(),
+					})
+					return nil
+				}
+				setCompressedResponseBody(resp, compressedBody, encoding)
+			} else {
+				setResponseBody(resp, []byte(response.SanitizedBody))
+			}
+			bodyReplaced = true
+		}
+		if p.inspectHeadersFlag {
+			for k, v := range sanitizedHeaders {
+				if k == "Content-Encoding" || k == "Content-Length" || k == "Transfer-Encoding" {
+					continue
+				}
+				if v == "" {
+					if resp.Header.Get(k) != "" {
+						headerReplaced = true
+					}
+					resp.Header.Del(k)
+				} else if resp.Header.Get(k) != v {
+					headerReplaced = true
+					resp.Header.Set(k, v)
+				}
+			}
+			if bodyReplaced && !compressed {
+				syncResponseBodyFraming(resp)
+			}
+		}
+	}
+
 	status := "passed"
 	if mode == modeBlock && hasFindings {
 		status = "blocked"
-	} else if mode == modeSanitize && hasFindings {
+	} else if mode == modeSanitize && (bodyReplaced || headerReplaced) {
 		status = "sanitized"
 	}
 
-	bodyPreview, bodyTruncated := eventBodyPreview(response.SanitizedBody)
+	sanitizedPreview := ""
+	bodyPreview, bodyTruncated := "", false
+	if bodyReplaced {
+		bodyPreview, bodyTruncated = eventBodyPreview(response.SanitizedBody)
+		sanitizedPreview = bodyPreview
+	}
 	headerPreview := sanitizeHeaderPreview(sanitizedHeaders)
 	p.events.publish(inspectionEvent{
 		ID:               response.ID,
@@ -942,7 +1022,7 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 		Category:         response.Category,
 		RiskLevel:        response.RiskLevel,
 		Findings:         allFindings,
-		SanitizedBody:    bodyPreview,
+		SanitizedBody:    sanitizedPreview,
 		BodyTruncated:    bodyTruncated,
 		SanitizedHeaders: headerPreview,
 		Direction:        string(directionResponse),
@@ -950,32 +1030,6 @@ func (p *proxyCore) inspectResponse(resp *http.Response, host string) error {
 		Inspected:        true,
 		ConnectionType:   "response",
 	})
-
-	if mode == modeBlock && hasFindings {
-		resp.StatusCode = http.StatusForbidden
-		setResponseBody(resp, []byte("response blocked by DLP policy\n"))
-		return nil
-	}
-
-	if mode == modeSanitize && hasFindings {
-		bodyReplaced := false
-		if response.SanitizedBody != "" && !isCompressed(resp) {
-			setResponseBody(resp, []byte(response.SanitizedBody))
-			bodyReplaced = true
-		}
-		if p.inspectHeadersFlag {
-			for k, v := range sanitizedHeaders {
-				if v == "" {
-					resp.Header.Del(k)
-				} else {
-					resp.Header.Set(k, v)
-				}
-			}
-			if bodyReplaced {
-				syncResponseBodyFraming(resp)
-			}
-		}
-	}
 
 	return nil
 }
@@ -1326,4 +1380,105 @@ func configuredMaxBodyBytes() int64 {
 		return parsed
 	}
 	return defaultMaxBodyBytes
+}
+
+func compressedResponseEncoding(resp *http.Response) (string, bool) {
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	if encoding == "" || encoding == "identity" {
+		return "", false
+	}
+	return encoding, true
+}
+
+func supportedCompressedResponseEncoding(encoding string) bool {
+	return encoding == "gzip" || encoding == "deflate"
+}
+
+func readLimitedDecompressed(reader io.Reader, maxBytes int64) ([]byte, bool, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if int64(len(data)) > maxBytes {
+		return nil, true, nil
+	}
+	return data, false, err
+}
+
+func decompressResponseBody(data []byte, encoding string, maxBytes int64) ([]byte, bool, error) {
+	var reader io.ReadCloser
+	var err error
+	switch encoding {
+	case "gzip":
+		reader, err = gzip.NewReader(bytes.NewReader(data))
+	case "deflate":
+		reader, err = zlib.NewReader(bytes.NewReader(data))
+		if err != nil {
+			reader = io.NopCloser(flate.NewReader(bytes.NewReader(data)))
+			err = nil
+		}
+	default:
+		return nil, false, fmt.Errorf("unsupported Content-Encoding %q", encoding)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	decompressed, tooLarge, readErr := readLimitedDecompressed(reader, maxBytes)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	if closeErr != nil {
+		return nil, false, closeErr
+	}
+	return decompressed, tooLarge, nil
+}
+
+func compressResponseBody(data []byte, encoding string) ([]byte, error) {
+	var output bytes.Buffer
+	if encoding == "gzip" {
+		writer := gzip.NewWriter(&output)
+		if _, err := writer.Write(data); err != nil {
+			return nil, err
+		}
+		if err := writer.Close(); err != nil {
+			return nil, err
+		}
+		return output.Bytes(), nil
+	}
+	if encoding == "deflate" {
+		writer := zlib.NewWriter(&output)
+		if _, err := writer.Write(data); err != nil {
+			return nil, err
+		}
+		if err := writer.Close(); err != nil {
+			return nil, err
+		}
+		return output.Bytes(), nil
+	}
+	return nil, fmt.Errorf("unsupported Content-Encoding %q", encoding)
+}
+
+func setCompressedResponseBody(resp *http.Response, body []byte, encoding string) {
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.TransferEncoding = nil
+	resp.Header.Set("Content-Encoding", encoding)
+	resp.Header.Set("Content-Length", fmt.Sprint(len(body)))
+	resp.Header.Del("Transfer-Encoding")
+	resp.Header.Del("Content-Range")
+	resp.Header.Del("Content-MD5")
+	resp.Header.Del("Digest")
+	resp.Header.Del("ETag")
+}
+
+func incompletelyInspectedResponse(p *proxyCore, resp *http.Response, host, status, reason string, mode inspectionMode) {
+	blocked := p.blockIncompleteBody(mode)
+	if blocked {
+		status = "blocked"
+		setResponseBody(resp, []byte("response blocked: body was not fully inspected\n"))
+		resp.StatusCode = http.StatusForbidden
+	}
+	p.events.publish(inspectionEvent{
+		Timestamp: time.Now().UTC(), Method: resp.Request.Method, Host: host, Path: resp.Request.URL.Path,
+		Mode: string(mode), Status: status, Protocol: "HTTPS", Inspected: false,
+		ConnectionType: "response", ValidationError: reason,
+	})
 }
