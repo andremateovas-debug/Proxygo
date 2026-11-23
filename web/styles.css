@@ -89,6 +89,16 @@ h1 { margin: 0; font-size: 22px; font-weight: 600; letter-spacing: -0.02em; }
 .subtitle { margin: 4px 0 0; font-size: 13px; color: var(--muted); }
 .clock { font-family: var(--mono); font-size: 12px; color: var(--muted); }
 
+.ca-control { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); }
+.ca-status-wrap { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.ca-indicator { width: 10px; height: 10px; flex: 0 0 10px; border-radius: 50%; background: var(--subtle); }
+.ca-indicator[data-enabled="true"] { background: var(--clean); box-shadow: 0 0 0 4px var(--clean-bg); }
+.ca-status-wrap strong { display: block; font-size: 13px; }
+.ca-status-wrap p { margin: 3px 0 0; color: var(--muted); font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
+.ca-toggle { min-height: 34px; padding: 0 12px; flex: 0 0 auto; border: 1px solid var(--border); border-radius: 6px; background: var(--card); font-size: 12px; font-weight: 600; cursor: pointer; }
+.ca-toggle:hover:not(:disabled) { background: var(--hover); }
+.ca-toggle:disabled { opacity: 0.6; cursor: wait; }
+
 .stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .stat-card {
 	background: var(--card);
@@ -213,4 +223,6 @@ tbody tr:last-child td { border-bottom: 0; }
 	.topbar-inner, .container { padding-inline: 16px; }
 	.filters { width: 100%; }
 	.input[type="search"] { flex: 1; width: auto; }
+	.ca-control { align-items: flex-start; }
+	.ca-status-wrap p { max-width: 55vw; }
 }

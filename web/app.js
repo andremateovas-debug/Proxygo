@@ -21,6 +21,10 @@
 		statusText: document.getElementById("streamStatusText"),
 		modeSelect: document.getElementById("modeSelect"),
 		activeMode: document.getElementById("activeMode"),
+		caIndicator: document.getElementById("caIndicator"),
+		caStatus: document.getElementById("caStatus"),
+		caMetadata: document.getElementById("caMetadata"),
+		caToggle: document.getElementById("caToggle"),
 		requestsPerMinute: document.getElementById("requestsPerMinute"),
 		cleanCount: document.getElementById("cleanCount"),
 		alertCount: document.getElementById("alertCount"),
@@ -88,6 +92,18 @@
 	function setStreamState(state, label) {
 		elements.status.dataset.state = state;
 		elements.statusText.textContent = label;
+	}
+
+	function updateCA(state) {
+		const enabled = Boolean(state.ca_enabled);
+		elements.caIndicator.dataset.enabled = String(enabled);
+		elements.caStatus.textContent = `CA / MITM ${enabled ? "activa" : "inactiva"}`;
+		elements.caToggle.textContent = enabled ? "Desactivar MITM" : "Activar MITM";
+		elements.caToggle.disabled = false;
+		const details = [state.ca_org || "ProxyGo"];
+		if (state.ca_cert_path) details.push(state.ca_cert_path);
+		if (state.ca_not_after) details.push(`válida hasta ${new Date(state.ca_not_after).toLocaleDateString("es-MX")}`);
+		elements.caMetadata.textContent = details.join(" · ");
 	}
 
 	function initChart() {
@@ -326,6 +342,7 @@
 			const response = await fetch("/api/state", { headers: { Accept: "application/json" }, cache: "no-store" });
 			if (!response.ok) throw new Error("No se pudo cargar el estado del servidor");
 			const state = await response.json();
+			updateCA(state);
 
 			if (["MONITOR", "SANITIZE", "BLOCK"].includes(state.mode)) {
 				elements.modeSelect.value = state.mode;
@@ -361,6 +378,24 @@
 		}
 	}
 
+	async function changeCA(enabled) {
+		elements.caToggle.disabled = true;
+		try {
+			const response = await fetch("/api/ca", {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Accept: "application/json" },
+				body: JSON.stringify({ enabled })
+			});
+			const payload = await response.json();
+			if (!response.ok) throw new Error(payload.error || "No se pudo cambiar el estado de MITM");
+			updateCA(payload);
+			showToast(`MITM ${payload.ca_enabled ? "activado" : "desactivado"}`);
+		} catch (error) {
+			elements.caToggle.disabled = false;
+			showToast(error.message, true);
+		}
+	}
+
 	async function changeMode(mode) {
 		elements.modeSelect.disabled = true;
 		try {
@@ -391,6 +426,10 @@
 		eventSource.onmessage = message => {
 			try {
 				const event = JSON.parse(message.data);
+				if (event.type === "state") {
+					updateCA(event);
+					return;
+				}
 				if (!stateReady) {
 					pendingQueue.push(event);
 					return;
@@ -404,6 +443,7 @@
 	}
 
 	elements.modeSelect.addEventListener("change", () => changeMode(elements.modeSelect.value));
+	elements.caToggle.addEventListener("click", () => changeCA(elements.caToggle.textContent === "Activar MITM"));
 	elements.search.addEventListener("input", renderRows);
 	elements.riskFilter.addEventListener("change", renderRows);
 	document.addEventListener("keydown", event => {

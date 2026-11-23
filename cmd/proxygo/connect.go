@@ -80,6 +80,7 @@ type connectHandler struct {
 	originRootCAs *x509.CertPool
 	mu            sync.Mutex
 	tunnels       map[net.Conn]struct{}
+	closed        bool
 }
 
 func configuredConnectConfig() (connectConfig, error) {
@@ -293,7 +294,12 @@ func (h *connectHandler) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rawConn.Close()
-	untrack := h.track(rawConn)
+	untrack, tracked := h.track(rawConn)
+	if !tracked {
+		_, _ = rw.WriteString("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")
+		_ = rw.Flush()
+		return
+	}
 	defer untrack()
 
 	if err := rawConn.SetDeadline(time.Now().Add(connectHandshakeTimeout)); err != nil {
@@ -420,21 +426,31 @@ func (h *connectHandler) serveTunnel(conn net.Conn, host string, port int, trans
 	}
 }
 
-func (h *connectHandler) track(conn net.Conn) func() {
+func (h *connectHandler) track(conn net.Conn) (func(), bool) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		_ = conn.Close()
+		return nil, false
+	}
 	h.tunnels[conn] = struct{}{}
-	h.mu.Unlock()
 	return func() {
 		h.mu.Lock()
 		delete(h.tunnels, conn)
 		h.mu.Unlock()
-	}
+	}, true
 }
 
 func (h *connectHandler) closeAll() {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	h.closed = true
+	connections := make([]net.Conn, 0, len(h.tunnels))
 	for conn := range h.tunnels {
+		connections = append(connections, conn)
+		delete(h.tunnels, conn)
+	}
+	h.mu.Unlock()
+	for _, conn := range connections {
 		_ = conn.Close()
 	}
 }

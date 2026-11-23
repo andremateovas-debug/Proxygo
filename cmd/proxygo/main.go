@@ -85,6 +85,7 @@ type dashboardState struct {
 	AlertCount uint64            `json:"alert_count"`
 	Buckets    []minuteBucket    `json:"buckets"`
 	Events     []inspectionEvent `json:"events"`
+	caPublicState
 }
 
 type activeMode struct {
@@ -194,6 +195,23 @@ func (h *eventHub) publish(event inspectionEvent) {
 		log.Printf("encode SSE event: %v", err)
 		return
 	}
+	h.broadcastLocked(data)
+}
+
+func (h *eventHub) publishState(state caPublicState) {
+	data, err := json.Marshal(struct {
+		Type string `json:"type"`
+		caPublicState
+	}{Type: "state", caPublicState: state})
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.broadcastLocked(data)
+}
+
+func (h *eventHub) broadcastLocked(data []byte) {
 	for subscriber := range h.subscribers {
 		select {
 		case subscriber <- data:
@@ -210,7 +228,7 @@ func (h *eventHub) publish(event inspectionEvent) {
 	}
 }
 
-func (h *eventHub) snapshot(currentMode string) dashboardState {
+func (h *eventHub) snapshot(currentMode string, caState ...caPublicState) dashboardState {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
@@ -230,7 +248,7 @@ func (h *eventHub) snapshot(currentMode string) dashboardState {
 		events[i] = h.history[len(h.history)-1-i]
 	}
 
-	return dashboardState{
+	state := dashboardState{
 		Mode:       currentMode,
 		Seq:        h.seq,
 		CleanCount: h.cleanCount,
@@ -238,6 +256,10 @@ func (h *eventHub) snapshot(currentMode string) dashboardState {
 		Buckets:    buckets,
 		Events:     events,
 	}
+	if len(caState) > 0 {
+		state.caPublicState = caState[0]
+	}
+	return state
 }
 
 func main() {
@@ -290,8 +312,10 @@ func run() error {
 		connect = newConnectHandler(ca, core, cfg, log.Default())
 		log.Printf("HTTPS MITM enabled (CA org=%s dir=%s ports=%v hosts=%v)", cfg.caOrg, cfg.caDir, cfg.ports, cfg.allowedHosts)
 	}
+	mitm := newMITMController(core, connect, log.Default(), events)
+	core.mitm = mitm
 	proxy := newHTTPProxy(core, connect, proxyAddr)
-	internal := newInternalServer(events, modes, dashAddr)
+	internal := newInternalServer(events, modes, dashAddr, mitm)
 	servers := []*http.Server{proxy, internal}
 	serveErrors := make(chan error, len(servers))
 	for _, server := range servers {
@@ -397,6 +421,7 @@ type proxyCore struct {
 	blockInvalidCerts   bool
 	blockPrivateNetwork bool
 	maxBodyBytes        int64
+	mitm                *mitmController
 }
 
 type inspectionResult struct {
@@ -428,6 +453,10 @@ func newHTTPProxy(core *proxyCore, connect *connectHandler, addr string) *http.S
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
+			if core.mitm != nil {
+				core.mitm.serve(w, r)
+				return
+			}
 			if connect == nil {
 				http.Error(w, "CONNECT tunneling is not supported", http.StatusNotImplemented)
 				return
@@ -926,8 +955,12 @@ func resetRequestBody(r *http.Request, body []byte) {
 	r.Header.Del("Expect")
 }
 
-func newInternalServer(events *eventHub, modes *activeMode, addr string) *http.Server {
+func newInternalServer(events *eventHub, modes *activeMode, addr string, controllers ...*mitmController) *http.Server {
 	mux := http.NewServeMux()
+	var mitm *mitmController
+	if len(controllers) > 0 {
+		mitm = controllers[0]
+	}
 	mux.HandleFunc("/api/state", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Allow", "GET")
@@ -936,7 +969,44 @@ func newInternalServer(events *eventHub, modes *activeMode, addr string) *http.S
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = json.NewEncoder(w).Encode(events.snapshot(string(modes.current())))
+		state := caPublicState{}
+		if mitm != nil {
+			state = mitm.publicState()
+		}
+		_ = json.NewEncoder(w).Encode(events.snapshot(string(modes.current()), state))
+	})
+	mux.HandleFunc("/api/ca", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if mitm == nil {
+			http.Error(w, "CA control unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(mitm.publicState())
+		case http.MethodPost:
+			var request struct {
+				Enabled *bool `json:"enabled"`
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, 1024)
+			decoder := json.NewDecoder(r.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&request); err != nil || request.Enabled == nil {
+				http.Error(w, "invalid CA request: enabled must be a boolean", http.StatusBadRequest)
+				return
+			}
+			state, err := mitm.setEnabled(*request.Enabled)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(state)
+		default:
+			w.Header().Set("Allow", "GET, POST")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	})
 	mux.HandleFunc("/api/mode", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

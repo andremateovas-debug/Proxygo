@@ -71,6 +71,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return usageError()
 		}
 		return exportCA(args[1:], stdout)
+	case "tui":
+		if len(args) != 1 {
+			return usageError()
+		}
+		return runTUI()
 	default:
 		return usageError()
 	}
@@ -153,5 +158,5 @@ func exportCA(args []string, stdout io.Writer) error {
 }
 
 func usageError() error {
-	return errors.New("usage: proxygo-cli start | stop | restart [engine|proxy] | status | ca-export [ruta]")
+	return errors.New("usage: proxygo-cli start | stop | restart [engine|proxy] | status | ca-export [ruta] | tui")
 }

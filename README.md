@@ -82,7 +82,14 @@ sudo proxygo-cli stop                  # Detiene ambos servicios
 sudo proxygo-cli restart engine        # Reinicia solo el motor Rust sin cortar conexiones activas
 sudo proxygo-cli status                # Muestra estado de los procesos y del socket UDS
 sudo proxygo-cli ca-export /tmp/ca.crt # Exporta el certificado público de la CA raíz
+sudo proxygo-cli tui                   # Abre el dashboard interactivo en la terminal
 ```
+
+La TUI usa `PROXYGO_DASH_ADDR` (por defecto `127.0.0.1:8081`) para la API/SSE y
+`PROXYGO_PROXY_ADDR` (por defecto `127.0.0.1:8080`) para ejecutar las pruebas
+de reacción. En la TUI, `1`/`2`/`3` cambian el modo, `Tab` abre el menú, `r`
+abre las cinco pruebas de [`test_de_reaccion.md`](test_de_reaccion.md), las
+flechas seleccionan eventos y `Enter` muestra el detalle sanitizado.
 
 ### Enrutar tráfico a través de ProxyGo
 Configura la variable de entorno `HTTP_PROXY` en tu terminal, script o aplicación:

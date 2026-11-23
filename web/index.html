@@ -43,6 +43,17 @@
 					<time class="clock" id="currentTime">--:--:--</time>
 				</section>
 
+				<section class="ca-control" aria-label="Autoridad certificadora MITM">
+					<div class="ca-status-wrap">
+						<span class="ca-indicator" id="caIndicator" data-enabled="false" aria-hidden="true"></span>
+						<div>
+						<strong id="caStatus">CA / MITM inactiva</strong>
+						<p id="caMetadata">Cargando certificado público…</p>
+					</div>
+					</div>
+					<button class="ca-toggle" id="caToggle" type="button" disabled>Activar MITM</button>
+				</section>
+
 				<section class="stats-grid" aria-label="Resumen del tráfico">
 					<article class="stat-card">
 						<span class="stat-label">Peticiones / min</span>

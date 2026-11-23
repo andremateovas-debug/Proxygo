@@ -62,6 +62,29 @@ ProxyGo no expone la clave privada por API, dashboard ni logs. Si `ca.key` se
 filtra, cualquier equipo que confíe en esa CA queda expuesto: retire la CA,
 genere una nueva y vuelva a distribuir el certificado público.
 
+## Estado y control en caliente
+
+El dashboard web y la TUI (`sudo proxygo-cli tui`) muestran el estado de MITM,
+la organización, la ruta de `ca.crt` y su vencimiento. `GET /api/state` incluye
+`ca_enabled`, `ca_org`, `ca_cert_path`, `ca_not_before` y `ca_not_after`; sólo
+se consulta el certificado público, nunca `ca.key`.
+
+La CA/MITM se puede alternar desde el dashboard o con:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8081/api/ca \
+  -H 'Content-Type: application/json' -d '{"enabled":true}'
+curl -sS -X POST http://127.0.0.1:8081/api/ca \
+  -H 'Content-Type: application/json' -d '{"enabled":false}'
+```
+
+Activar MITM vuelve a validar la carpeta y los permisos de la CA, carga o crea
+el par de archivos si hace falta y exige `PROXYGO_CONNECT_ALLOWED_HOSTS` no
+vacío. Desactivarlo rechaza nuevos `CONNECT` y cierra túneles interceptados,
+pero conserva `ca.crt` y `ca.key`. Los cambios se notifican por SSE y aparecen
+en el siguiente snapshot de estado. Proteja el acceso al panel como cualquier
+interfaz de control del proxy.
+
 ## Exportar el certificado público
 
 Con el paquete instalado:
