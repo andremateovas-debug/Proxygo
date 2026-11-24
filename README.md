@@ -60,7 +60,7 @@ ProxyGo separa el plano de red y control del motor de inspección profunda para 
 Descarga e instala el paquete `.deb` oficial desde GitHub Releases:
 
 ```bash
-curl -fsSL [https://raw.githubusercontent.com/andremateovas-debug/proxygo/main/install.sh](https://raw.githubusercontent.com/andremateovas-debug/proxygo/main/install.sh) | bash
+curl -fsSL https://raw.githubusercontent.com/andremateovas-debug/Proxygo/main/install.sh | bash
 ```
 
 ### Opción 2: Compilación desde el código fuente
@@ -68,7 +68,7 @@ curl -fsSL [https://raw.githubusercontent.com/andremateovas-debug/proxygo/main/i
 **Requisitos:** Go 1.22+, Rust / Cargo 1.78+ y Linux (o WSL2) para soporte nativo de Unix Domain Sockets.
 
 ```bash
-git clone [https://github.com/andremateovas-debug/proxygo.git](https://github.com/andremateovas-debug/proxygo.git)
+git clone https://github.com/andremateovas-debug/Proxygo.git
 cd proxygo
 
 make build
@@ -102,11 +102,11 @@ La TUI usa `PROXYGO_DASH_ADDR` (por defecto `127.0.0.1:8081`) para la API/SSE, `
 Configura las variables de entorno `HTTP_PROXY` y `HTTPS_PROXY` en tu terminal, script o aplicación:
 
 ```bash
-export HTTP_PROXY="[http://127.0.0.1:8080](http://127.0.0.1:8080)"
-export HTTPS_PROXY="[http://127.0.0.1:8080](http://127.0.0.1:8080)"
+export HTTP_PROXY="http://127.0.0.1:8080"
+export HTTPS_PROXY="http://127.0.0.1:8080"
 
 # Ejemplo de petición HTTP auditada
-curl -x [http://127.0.0.1:8080](http://127.0.0.1:8080) -X POST [http://httpbin.org/post](http://httpbin.org/post) \
+curl -x http://127.0.0.1:8080 -X POST http://httpbin.org/post \
   -H "Content-Type: application/json" \
   -d '{"model": "claude-3-7-sonnet", "prompt": "Hola mundo"}'
 ```
@@ -217,7 +217,7 @@ sudo systemctl restart proxygo-proxy.service
 sudo proxygo-cli ca-export /tmp/proxygo-ca.crt
 
 # Prueba HTTPS pasando por el túnel MITM
-curl --proxy [http://127.0.0.1:8080](http://127.0.0.1:8080) --cacert /tmp/proxygo-ca.crt [https://example.com/](https://example.com/)
+curl --proxy http://127.0.0.1:8080 --cacert /tmp/proxygo-ca.crt https://example.com/
 ```
 
 Instala `proxygo-ca.crt` únicamente en los dispositivos autorizados. Por defecto, `PROXYGO_BLOCK_PRIVATE_NETWORKS=true` bloquea destinos privados/loopback en `CONNECT` para evitar SSRF, y el tráfico que no puede descifrarse como HTTP/1.1 (como HTTP/2, HTTP/3/QUIC, WebSockets, mTLS o *certificate pinning*) se rige por `PROXYGO_SECURITY_POLICY`.
@@ -286,7 +286,7 @@ Si instalaste el paquete `.deb`, puedes lanzar las pruebas rápidas de anomalía
 sudo /usr/share/proxygo/test-anomalies.sh
 
 # Si reasignaste el puerto del proxy (por ejemplo a 8088):
-sudo env PROXYGO_TEST_PROXY_URL="[http://127.0.0.1:8088](http://127.0.0.1:8088)" /usr/share/proxygo/test-anomalies.sh
+sudo env PROXYGO_TEST_PROXY_URL="http://127.0.0.1:8088" /usr/share/proxygo/test-anomalies.sh
 ```
 
 ---
