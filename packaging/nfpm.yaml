@@ -5,7 +5,7 @@ version: 1.2.6
 section: net
 priority: optional
 maintainer: Andre Mateo Vasquez Mosqueda / AM Devs
-description: HTTP DLP proxy with a Rust inspection engine
+description: Proxy y firewall DLP de tráfico HTTP/HTTPS con motor de inspección en Rust
 license: Apache-2.0
 contents:
   - src: ./engine-rust/target/release/proxygo-engine
