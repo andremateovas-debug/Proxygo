@@ -24,7 +24,7 @@ ProxyGo separa el plano de red y control del motor de inspección profunda para 
 └───────────────┬───────────────┘                     └─────────────────────────┘
                 │
                 ├───────────────────────────────────▶ ┌─────────────────────────┐
-                │          API / SSE (:8081)          │  TUI de consola         │
+                │          API / SSE (:8081)          │  TUI de consola          │
                 │                                     │  proxygo-cli            │
                 │                                     └─────────────────────────┘
                 │ Unix Domain Socket (/run/proxygo/engine.sock)
@@ -37,7 +37,7 @@ ProxyGo separa el plano de red y control del motor de inspección profunda para 
 
 - **Plano de Red y Control (Go):** Gestiona el proxy HTTP y túneles HTTPS MITM con certificados dinámicos por dominio, aplica políticas de resiliencia (*Fail-Open* / *Fail-Closed*) y de tráfico no inspeccionable, recalcula cabeceras dinámicamente tras la sanitización, conserva el estado reciente en memoria del servidor (`GET /api/state`) y transmite eventos en vivo mediante *Server-Sent Events* (SSE) sirviendo el frontend embebido (`go:embed`). Por defecto, ambos servidores escuchan únicamente en `127.0.0.1` (cualquier bind no-loopback del panel exige autenticación explícita).
 - **Motor de Inspección DLP (Rust):** Corre como un proceso independiente comunicado por **Unix Domain Sockets (UDS)** con protocolo NDJSON. Analiza cuerpos y cabeceras en microsegundos sin pausas de recolección de basura, detectando secretos conocidos y cadenas de alta entropía.
-- **Aislamiento de Fallos:** Si el motor de Rust sufre una interrupción o excede el timeout configurado (15 ms), `systemd` lo reinicia automáticamente mientras el proxy en Go mantiene el control del tráfico según la política configurada sin colgar las conexiones.
+- **Aislamiento de Fallos:** Si el motor de Rust sufre una interrupción o excede el timeout configurado (15 ms), `systemd` lo reinicia automáticamente mientras el proxy en Go mantiene el control del tráfico sin colgar las conexiones.
 
 ---
 
@@ -50,7 +50,7 @@ ProxyGo separa el plano de red y control del motor de inspección profunda para 
   - `SANITIZE`: Reemplaza credenciales detectadas por etiquetas seguras (`[REDACTED_...]`) antes de que salgan a internet o regresen al cliente.
   - `BLOCK`: Detiene la petición o respuesta inmediatamente con estado `HTTP 403 Forbidden` y emite una alerta crítica.
 - **Dashboard Minimalista con Estado en Servidor:** Interfaz web ligera construida con HTML, CSS puro y Chart.js embebida directamente en el binario de Go. Los contadores, métricas por minuto y eventos recientes persisten en el servidor al recargar el navegador, distinguiendo tráfico HTTP/HTTPS y eventos inspeccionados, sanitizados, bloqueados o con errores TLS.
-- **Administración Integrada:** CLI (`proxygo-cli`) y unidades `systemd` endurecidas para operar ambos servicios de forma unificada.
+- **Administración Integrada:** CLI (`proxygo-cli`), interfaz interactiva en consola (`proxygo-cli tui`) y unidades `systemd` endurecidas para operar ambos servicios de forma unificada.
 
 ---
 
@@ -60,7 +60,7 @@ ProxyGo separa el plano de red y control del motor de inspección profunda para 
 Descarga e instala el paquete `.deb` oficial desde GitHub Releases:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/andremateovas-debug/Proxygo/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/andremateovas-debug/proxygo/main/install.sh | bash
 ```
 
 ### Opción 2: Compilación desde el código fuente
@@ -68,7 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/andremateovas-debug/Proxygo/main/in
 **Requisitos:** Go 1.22+, Rust / Cargo 1.78+ y Linux (o WSL2) para soporte nativo de Unix Domain Sockets.
 
 ```bash
-git clone https://github.com/andremateovas-debug/Proxygo.git
+git clone https://github.com/andremateovas-debug/proxygo.git
 cd proxygo
 
 make build
@@ -90,9 +90,17 @@ sudo proxygo-cli ca-export /tmp/ca.crt # Exporta el certificado público de la C
 sudo proxygo-cli tui                   # Abre el dashboard interactivo en la terminal
 ```
 
-La TUI usa `PROXYGO_DASH_ADDR` (por defecto `127.0.0.1:8081`) para la API/SSE, `PROXYGO_PROXY_ADDR` (o `PROXY_ADDR`, por defecto `127.0.0.1:8080`) para ejecutar las pruebas de reacción y `PROXYGO_CA_DIR` para la prueba HTTPS MITM. En la TUI, `1`/`2`/`3` cambian el modo, `Tab` abre el menú (incluyendo el estado/toggle de CA), `r` abre las pruebas de [`test_de_reaccion.md`](test_de_reaccion.md), las flechas seleccionan eventos y `Enter` muestra el detalle sanitizado.
+La TUI usa `PROXYGO_DASH_ADDR` (por defecto `127.0.0.1:8081`) para la API/SSE,
+`PROXYGO_PROXY_ADDR` (o `PROXY_ADDR`, por defecto `127.0.0.1:8080`) para ejecutar las pruebas
+de reacción y `PROXYGO_CA_DIR` para la prueba HTTPS MITM. En la TUI, `1`/`2`/`3` cambian el modo,
+`Tab` abre el menú (incluyendo el estado/toggle de CA), `r` abre las pruebas de
+[`test_de_reaccion.md`](test_de_reaccion.md), las flechas seleccionan eventos y `Enter`
+muestra el detalle sanitizado.
 
-> **Nota sobre `sudo` y variables de entorno:** Por defecto, `sudo` suele reiniciar las variables de entorno (`env_reset`). Si reasignaste el puerto del proxy (por ejemplo a `127.0.0.1:8088`) o necesitas leer `/var/lib/proxygo/ca/ca.crt` con `sudo`, pasa las variables con `sudo env` o crea un script *wrapper* en `/usr/local/bin/proxygo-tui`:
+> **Nota sobre `sudo` y variables de entorno:** Por defecto, `sudo` suele reiniciar las variables
+> de entorno (`env_reset`). Si reasignaste el puerto del proxy (por ejemplo a `127.0.0.1:8088`)
+> o necesitas leer `/var/lib/proxygo/ca/ca.crt` con `sudo`, pasa las variables con `sudo env` o
+> crea un script *wrapper* en `/usr/local/bin/proxygo-tui`:
 > ```bash
 > sudo env PROXYGO_PROXY_ADDR="127.0.0.1:8088" PROXY_ADDR="127.0.0.1:8088" \
 >   PROXYGO_DASH_ADDR="127.0.0.1:8081" PROXYGO_CA_DIR="/var/lib/proxygo/ca" proxygo-cli tui
@@ -115,7 +123,15 @@ Accede al panel de monitoreo en tiempo real desde tu navegador en: **`http://127
 
 ### Seguridad de la administración
 
-El panel escucha por defecto solo en `127.0.0.1:8081`. En el primer inicio, ProxyGo genera un token aleatorio de 256 bits y lo guarda en `/var/lib/proxygo/admin.token` con permisos `0600`; conserva únicamente su hash SHA-256 en memoria y nunca lo devuelve por HTTP ni lo escribe en logs. En un bind loopback, las lecturas del dashboard siguen abiertas; los controles de modo y CA solicitan el token. En un bind no-loopback, la primera lectura del estado solicita el token y el navegador recibe una cookie de sesión `HttpOnly` para mantener abierto el flujo SSE. La TUI lee el mismo token del archivo si el usuario tiene permiso.
+El panel escucha por defecto solo en `127.0.0.1:8081`. En el primer inicio,
+ProxyGo genera un token aleatorio de 256 bits y lo guarda en
+`/var/lib/proxygo/admin.token` con permisos `0600`; conserva únicamente su hash
+SHA-256 en memoria y nunca lo devuelve por HTTP ni lo escribe en logs. En un
+bind loopback, las lecturas del dashboard siguen abiertas; los controles de
+modo y CA solicitan el token. En un bind no-loopback, la primera lectura del
+estado solicita el token y el navegador recibe una cookie de sesión `HttpOnly`
+para mantener abierto el flujo SSE. La TUI lee el mismo token del archivo si el
+usuario tiene permiso.
 
 Para recuperar el token generado en una instalación con `systemd`:
 
@@ -123,7 +139,11 @@ Para recuperar el token generado en una instalación con `systemd`:
 sudo cat /var/lib/proxygo/admin.token
 ```
 
-También puedes proporcionar un token propio de al menos 32 caracteres mediante `PROXYGO_ADMIN_TOKEN`, o elegir un archivo privado con `PROXYGO_ADMIN_TOKEN_FILE`. El valor del entorno prevalece sobre el archivo. Para un token de entorno, usa un archivo de entorno de `systemd` protegido en lugar de incluir el secreto directamente en la unidad:
+También puedes proporcionar un token propio de al menos 32 caracteres mediante
+`PROXYGO_ADMIN_TOKEN`, o elegir un archivo privado con
+`PROXYGO_ADMIN_TOKEN_FILE`. El valor del entorno prevalece sobre el archivo.
+Para un token de entorno, usa un archivo de entorno de `systemd` protegido en
+lugar de incluir el secreto directamente en la unidad:
 
 ```bash
 sudo install -d -m 0700 /etc/proxygo
@@ -138,7 +158,9 @@ Añade al *override*:
 EnvironmentFile=/etc/proxygo/admin.env
 ```
 
-Para usar un archivo de token explícito, crea uno privado y configura `PROXYGO_ADMIN_TOKEN_FILE` en el mismo *override*. Esta declaración explícita es obligatoria si `PROXYGO_DASH_ADDR` escucha fuera de loopback:
+Para usar un archivo de token explícito, crea uno privado y configura
+`PROXYGO_ADMIN_TOKEN_FILE` en el mismo *override*. Esta declaración explícita
+es obligatoria si `PROXYGO_DASH_ADDR` escucha fuera de loopback:
 
 ```bash
 sudo install -d -o proxygo -g proxygo -m 0700 /var/lib/proxygo
@@ -150,19 +172,34 @@ sudo -u proxygo sh -c 'umask 077; openssl rand -base64 48 > /var/lib/proxygo/adm
 Environment="PROXYGO_ADMIN_TOKEN_FILE=/var/lib/proxygo/admin.token"
 ```
 
-Aplica los cambios con `sudo systemctl daemon-reload` y reinicia el servicio. El token se transmite por HTTP al navegador, por lo que un bind remoto requiere un canal de red confiable/cifrado; el mecanismo recomendado sigue siendo el loopback predeterminado con túnel SSH.
+Aplica los cambios con `sudo systemctl daemon-reload` y reinicia el servicio.
+El token se transmite por HTTP al navegador, por lo que un bind remoto requiere
+un canal de red confiable/cifrado; el mecanismo recomendado sigue siendo el
+loopback predeterminado con túnel SSH.
 
-Las operaciones `POST /api/mode` y `POST /api/ca` siempre exigen `Authorization: Bearer <token>` y un encabezado `Origin` del mismo origen. Con un bind no-loopback, también lo exigen `GET /api/state`, `GET /api/mode`, `GET /api/ca` y `GET /events`; en loopback esas lecturas no requieren token. Los orígenes cruzados y encabezados de autorización duplicados se rechazan. La TUI adjunta el token a sus lecturas y cambios de estado. Las vistas de cabeceras ocultan valores de autorización, cookies, claves API, tokens y secretos.
+Las operaciones `POST /api/mode` y `POST /api/ca` siempre exigen
+`Authorization: Bearer <token>` y un encabezado `Origin` del mismo origen. Con
+un bind no-loopback, también lo exigen `GET /api/state`, `GET /api/mode`,
+`GET /api/ca` y `GET /events`; en loopback esas lecturas no requieren token.
+Los orígenes cruzados y encabezados de autorización duplicados se rechazan. La
+TUI adjunta el token a sus lecturas y cambios de estado. Las vistas de cabeceras
+ocultan valores de autorización, cookies, claves API, tokens y secretos.
 
-Si el servicio usa `PROXYGO_ADMIN_TOKEN` desde `/etc/proxygo/admin.env`, inicia la TUI cargando ese mismo archivo, por ejemplo:
+Si el servicio usa `PROXYGO_ADMIN_TOKEN` desde `/etc/proxygo/admin.env`, inicia
+la TUI cargando ese mismo archivo, por ejemplo:
 
 ```bash
 sudo bash -c 'set -a; . /etc/proxygo/admin.env; exec proxygo-cli tui'
 ```
 
-Si configuraste `PROXYGO_ADMIN_TOKEN_FILE`, pasa también esa variable al proceso `proxygo-cli tui`.
+Si configuraste `PROXYGO_ADMIN_TOKEN_FILE`, pasa también esa variable al
+proceso `proxygo-cli tui`.
 
-Si configuras `PROXYGO_DASH_ADDR` en una interfaz no loopback, debes declarar explícitamente `PROXYGO_ADMIN_TOKEN` o `PROXYGO_ADMIN_TOKEN_FILE`; de lo contrario, ProxyGo no inicia. El panel usa HTTP sin cifrado: mantén el bind en loopback y usa un túnel SSH para administración remota. No expongas directamente el puerto del dashboard a redes no confiables.
+Si configuras `PROXYGO_DASH_ADDR` en una interfaz no loopback, debes declarar
+explícitamente `PROXYGO_ADMIN_TOKEN` o `PROXYGO_ADMIN_TOKEN_FILE`; de lo
+contrario, ProxyGo no inicia. El panel usa HTTP sin cifrado: mantén el bind en
+loopback y usa un túnel SSH para administración remota. No expongas directamente
+el puerto del dashboard a redes no confiables.
 
 ---
 
@@ -211,14 +248,28 @@ Environment="PROXYGO_CONNECT_ALLOWED_HOSTS=api.example.com,*.trusted.example"
 sudo systemctl restart proxygo-proxy.service
 ```
 
-### Exportar y probar la CA
+### Exportar y confiar en la CA (cURL, Node.js, Claude Code y sistema)
 
-```bash
-sudo proxygo-cli ca-export /tmp/proxygo-ca.crt
+Para que los clientes HTTPS acepten los certificados dinámicos firmados por ProxyGo sin errores de verificación TLS (`SSL certificate verification failed`):
 
-# Prueba HTTPS pasando por el túnel MITM
-curl --proxy http://127.0.0.1:8080 --cacert /tmp/proxygo-ca.crt https://example.com/
-```
+1. **Instala el certificado público en el almacén del sistema (Ubuntu/Debian):**
+   ```bash
+   sudo proxygo-cli ca-export /usr/local/share/ca-certificates/proxygo-ca.crt
+   sudo update-ca-certificates
+   ```
+2. **Prueba con `curl`:**
+   ```bash
+   curl --proxy http://127.0.0.1:8080 --cacert /usr/local/share/ca-certificates/proxygo-ca.crt https://example.com/
+   ```
+3. **Uso con aplicaciones Node.js / CLIs (como Claude Code):**
+   Runtimes como Node.js utilizan su propio bundle de certificados si no se indica `NODE_EXTRA_CA_CERTS`. Exporta las variables de proxy y certificado en la misma sesión antes de ejecutar la CLI:
+   ```bash
+   export HTTP_PROXY="http://127.0.0.1:8080"
+   export HTTPS_PROXY="http://127.0.0.1:8080"
+   export NODE_EXTRA_CA_CERTS="/usr/local/share/ca-certificates/proxygo-ca.crt"
+   export SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+   ```
+   *(Si reasignaste el puerto del proxy, por ejemplo a `8088`, sustituye `8080` por `8088`.)*
 
 Instala `proxygo-ca.crt` únicamente en los dispositivos autorizados. Por defecto, `PROXYGO_BLOCK_PRIVATE_NETWORKS=true` bloquea destinos privados/loopback en `CONNECT` para evitar SSRF, y el tráfico que no puede descifrarse como HTTP/1.1 (como HTTP/2, HTTP/3/QUIC, WebSockets, mTLS o *certificate pinning*) se rige por `PROXYGO_SECURITY_POLICY`.
 
