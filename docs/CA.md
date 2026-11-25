@@ -1,8 +1,8 @@
 # CA de ProxyGo para HTTPS MITM
 
-ProxyGo puede inspeccionar HTTPS solo si el cliente confía en una CA propia.
-La CA se genera una vez y se reutiliza; las conexiones nunca usan certificados
-autofirmados distintos.
+ProxyGo puede inspeccionar tráfico HTTPS solo si el cliente confía en una Autoridad Certificadora (CA) propia. La CA se genera una sola vez y se reutiliza en disco; cada dominio interceptado recibe un certificado dinámico firmado en memoria por esa misma CA, nunca certificados autofirmados distintos por conexión.
+
+---
 
 ## Configuración
 
@@ -10,36 +10,29 @@ Variables de entorno del servicio `proxygo-proxy` para la CA y túneles `CONNECT
 
 | Variable | Por defecto | Uso |
 |---|---|---|
-| `PROXYGO_MITM_ENABLED` | `false` | Activa `CONNECT` con inspección TLS. |
-| `PROXYGO_CA_DIR` | `/var/lib/proxygo/ca` | Carpeta de la CA. Debe ser propia de cada instalación. |
-| `PROXYGO_CA_ORG` | `ProxyGo` | Organización del certificado raíz. Solo se usa al crear la CA. |
+| `PROXYGO_MITM_ENABLED` | `false` | Activa `CONNECT` con inspección TLS MITM desde el arranque. |
+| `PROXYGO_CA_DIR` | `/var/lib/proxygo/ca` | Carpeta de la CA. Debe ser propia y privada de cada instalación. |
+| `PROXYGO_CA_ORG` | `ProxyGo` | Organización del certificado raíz (`O=`). Solo se aplica al crear la CA por primera vez. |
 | `PROXYGO_CONNECT_PORTS` | `443` | Puertos permitidos para `CONNECT`, separados por coma. |
-| `PROXYGO_CONNECT_ALLOWED_HOSTS` | vacío | Hosts permitidos, separados por coma. Admite `*.example.com` y `*`. Sin lista, el arranque falla. |
-| `PROXYGO_CONNECT_MAX` | `128` | Túneles concurrentes máximos. |
+| `PROXYGO_CONNECT_ALLOWED_HOSTS` | vacío | Hosts permitidos para `CONNECT`, separados por coma. Admite comodines (`*.example.com`) y `*`. **Obligatorio** para habilitar MITM. |
+| `PROXYGO_CONNECT_MAX` | `128` | Número máximo de túneles `CONNECT` concurrentes. |
 
 ### Variables avanzadas de inspección y seguridad
 
 | Variable | Valores admitidos | Uso |
 |---|---|---|
-| `PROXYGO_SECURITY_POLICY` | `ALLOW_UNINSPECTED`, `MONITOR_UNINSPECTED`, `BLOCK_UNINSPECTED` | Define cómo actuar ante tráfico no inspeccionable (certificate pinning, mTLS, HTTP/2, HTTP/3/QUIC, WebSockets, SSE, contenido comprimido o certificados inválidos) y ante fallos/timeouts del motor en HTTPS. |
-| `PROXYGO_FAILURE_POLICY` | `FAIL_OPEN`, `FAIL_CLOSED` | Política cuando el motor Rust no responde o supera el timeout (en el servicio `systemd` viene fijada en `FAIL_CLOSED`). |
+| `PROXYGO_SECURITY_POLICY` | `ALLOW_UNINSPECTED`, `MONITOR_UNINSPECTED`, `BLOCK_UNINSPECTED` | Define cómo actuar ante tráfico no inspeccionable (*certificate pinning*, mTLS, HTTP/2, HTTP/3/QUIC, WebSockets, SSE o certificados inválidos) y ante fallos/timeouts del motor en HTTPS. |
+| `PROXYGO_FAILURE_POLICY` | `FAIL_OPEN`, `FAIL_CLOSED` | Política cuando el motor Rust no responde o supera el timeout de 15 ms (en el servicio `systemd` viene fijada en `FAIL_CLOSED`). |
 | `PROXYGO_INSPECT_REQUESTS` | `true` / `false` | Activa o desactiva la inspección DLP en el cuerpo de las peticiones salientes. |
 | `PROXYGO_INSPECT_RESPONSES` | `true` / `false` | Activa o desactiva la inspección DLP en el cuerpo de las respuestas entrantes. |
-| `PROXYGO_INSPECT_HEADERS` | `true` / `false` | Activa o desactiva la inspección y sanitización de cabeceras HTTP (por ejemplo, fuga de tokens `Authorization`). |
-| `PROXYGO_BLOCK_INVALID_CERTS` | `true` / `false` | Controla el bloqueo de servidores destino con certificados TLS inválidos o expirados. |
-| `PROXYGO_BLOCK_PRIVATE_NETWORKS` | `true` / `false` | Por defecto (`true`) bloquea destinos privados, loopback y link-local además de multicast y rangos reservados. `false` permite destinos privados, loopback y link-local en túneles CONNECT; úselo solo en redes de confianza porque permite SSRF hacia servicios internos. Multicast, direcciones no especificadas y rangos reservados siguen bloqueados. |
+| `PROXYGO_INSPECT_HEADERS` | `true` / `false` | Activa o desactiva la inspección y sanitización de cabeceras HTTP (por ejemplo, `Authorization`, `Cookie` o `X-API-Key`). |
+| `PROXYGO_BLOCK_INVALID_CERTS` | `true` / `false` | Bloquea servidores destino con certificados TLS inválidos o expirados. |
+| `PROXYGO_BLOCK_PRIVATE_NETWORKS` | `true` / `false` | Por defecto (`true`) bloquea destinos privados, loopback y link-local en `CONNECT` para prevenir SSRF. Usar `false` solo en redes de confianza. |
 | `PROXYGO_MAX_BODY_BYTES` | entero (bytes) | Límite máximo solicitado para inspeccionar cada cuerpo. El motor NDJSON admite hasta 1 MiB por cuerpo; el límite efectivo es el menor entre ambos. |
 
-Los cuerpos que superan el límite se detectan leyendo como máximo un byte
-adicional y no se envían al motor como si estuvieran completos. En modo
-`MONITOR` se retransmiten intactos y el evento queda marcado como
-`body_too_large` con `inspected=false`. En modos `BLOCK` y `SANITIZE` se
-bloquean, ya que el proxy no puede confirmar que el cuerpo completo esté libre
-de secretos ni afirmar que lo saneó. Los errores de lectura también quedan
-registrados como cuerpos no inspeccionados. El resto del cuerpo se mantiene en
-streaming y no se carga completo en memoria.
+Los cuerpos que superan el límite se detectan sin cargar todo el payload en memoria y nunca se envían truncados al motor como si estuvieran completos: en modo `MONITOR` pasan intactos marcados como `body_too_large` (`inspected=false`), y en modos `BLOCK` y `SANITIZE` se bloquean al no poder garantizar que estén libres de secretos.
 
-Ejemplo con systemd:
+### Ejemplo persistente con `systemd`
 
 ```bash
 sudo systemctl edit proxygo-proxy.service
@@ -53,148 +46,155 @@ Environment="PROXYGO_CONNECT_ALLOWED_HOSTS=api.example.com,*.trusted.example"
 ```
 
 ```bash
+sudo systemctl daemon-reload
 sudo systemctl restart proxygo-proxy.service
 ```
 
-En un despliegue centralizado, cada organización debe usar su propio
-`PROXYGO_CA_DIR` y `PROXYGO_CA_ORG`. No comparta `ca.key` entre organizaciones.
+> En un despliegue centralizado, cada organización o entorno debe usar su propio `PROXYGO_CA_DIR` y `PROXYGO_CA_ORG`. Nunca compartas `ca.key` entre organizaciones ni repositorios.
+
+---
 
 ## Archivos y permisos
 
-- `ca.key`: clave privada de la CA. Permisos `0600`. No se copia ni se publica.
-- `ca.crt`: certificado público de la CA. Permisos `0644`.
-- La carpeta de la CA debe ser privada (`0700`); si no existe, se crea con esos
-  permisos. Si existe con permisos para grupo u otros, ProxyGo se niega a
-  arrancar.
+- `ca.key`: clave privada ECDSA P-256 de la CA. Permisos `0600`. Nunca se copia, distribuye ni expone.
+- `ca.crt`: certificado público de la CA raíz. Permisos `0644`.
+- Directorio de la CA (`/var/lib/proxygo/ca`): permisos `0700` pertenecientes al usuario `proxygo`. Si el directorio tiene permisos abiertos para grupo u otros, ProxyGo rechazará arrancar o activar MITM.
 
-ProxyGo no expone la clave privada por API, dashboard ni logs. Si `ca.key` se
-filtra, cualquier equipo que confíe en esa CA queda expuesto: retire la CA,
-genere una nueva y vuelva a distribuir el certificado público.
+ProxyGo no expone la clave privada por API, dashboard, TUI ni logs. Si `ca.key` se compromete, detén el servicio, elimina la carpeta de la CA, retira el certificado de los dispositivos cliente y genera una nueva CA.
 
-## Estado y control en caliente
+---
 
-El dashboard web y la TUI (`sudo proxygo-cli tui`) muestran el estado de MITM,
-la organización, la ruta de `ca.crt` y su vencimiento. `GET /api/state` incluye
-`ca_enabled`, `ca_org`, `ca_cert_path`, `ca_not_before` y `ca_not_after`; sólo
-se consulta el certificado público, nunca `ca.key`.
+## Estado y control en caliente (TUI, Dashboard y API)
 
-La CA/MITM se puede alternar desde el dashboard o con:
+El dashboard web (`http://127.0.0.1:8081`) y la TUI (`sudo proxygo-cli tui`) muestran en tiempo real si MITM está activo (`CA: ON/OFF`), la organización, la ruta de `ca.crt` y su fecha de vencimiento. El endpoint `GET /api/state` expone `ca_enabled`, `ca_org`, `ca_cert_path`, `ca_not_before` y `ca_not_after` (únicamente metadatos públicos, nunca `ca.key`).
+
+### Activar o desactivar desde la TUI
+1. Asegúrate de que el servicio tenga definido `PROXYGO_CONNECT_ALLOWED_HOSTS` en `systemd` (de lo contrario devolverá error al intentar encenderla).
+2. Ejecuta la TUI con acceso al directorio de la CA y al token administrativo:
+   ```bash
+   sudo env PROXYGO_PROXY_ADDR="127.0.0.1:8080" PROXY_ADDR="127.0.0.1:8080" \
+     PROXYGO_DASH_ADDR="127.0.0.1:8081" PROXYGO_CA_DIR="/var/lib/proxygo/ca" proxygo-cli tui
+   ```
+   *(Ajusta `127.0.0.1:8080` si reasignaste el puerto del proxy.)*
+3. Pulsa **`Tab`** para abrir el menú operativo, selecciona **`CA / MITM`** y presiona **`Enter`**.
+
+### Activar o desactivar vía API administrativa
+Las mutaciones en `POST /api/ca` requieren el token administrativo (`/var/lib/proxygo/admin.token`) y un encabezado `Origin` del mismo origen:
 
 ```bash
+ADMIN_TOKEN=$(sudo cat /var/lib/proxygo/admin.token)
+
+# Activar MITM en caliente
 curl -sS -X POST http://127.0.0.1:8081/api/ca \
-  -H 'Content-Type: application/json' -d '{"enabled":true}'
+  -H "Origin: http://127.0.0.1:8081" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true}'
+
+# Desactivar MITM en caliente
 curl -sS -X POST http://127.0.0.1:8081/api/ca \
-  -H 'Content-Type: application/json' -d '{"enabled":false}'
+  -H "Origin: http://127.0.0.1:8081" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":false}'
 ```
 
-Activar MITM vuelve a validar la carpeta y los permisos de la CA, carga o crea
-el par de archivos si hace falta y exige `PROXYGO_CONNECT_ALLOWED_HOSTS` no
-vacío. Desactivarlo rechaza nuevos `CONNECT` y cierra túneles interceptados,
-pero conserva `ca.crt` y `ca.key`. Los cambios se notifican por SSE y aparecen
-en el siguiente snapshot de estado. Proteja el acceso al panel como cualquier
-interfaz de control del proxy.
+Al activar MITM en caliente, ProxyGo valida los permisos de la carpeta, genera o carga `ca.crt`/`ca.key` y verifica que `PROXYGO_CONNECT_ALLOWED_HOSTS` no esté vacío. Al desactivarlo, rechaza nuevas peticiones `CONNECT` con HTTP `501` y cierra túneles interceptados sin borrar la CA del disco. Este cambio en caliente vive en memoria; al reiniciar `proxygo-proxy.service`, el servicio vuelve al estado definido en `systemd`.
+
+---
 
 ## Exportar el certificado público
-
-Con el paquete instalado:
 
 ```bash
 sudo proxygo-cli ca-export /tmp/proxygo-ca.crt
 ```
 
-También puede copiarse el archivo público:
+Si personalizaste `PROXYGO_CA_DIR`, pásalo al CLI:
 
 ```bash
-sudo cp /var/lib/proxygo/ca/ca.crt /tmp/proxygo-ca.crt
+sudo env PROXYGO_CA_DIR="/ruta/personalizada/ca" proxygo-cli ca-export /tmp/proxygo-ca.crt
 ```
 
-Si cambió `PROXYGO_CA_DIR`, expórtelo también al usar el CLI o copie el archivo
-desde esa ruta.
+---
 
-## Instalar en Ubuntu / Debian
+## Instalación y confianza en clientes
 
+### Ubuntu / Debian (almacén del sistema)
 ```bash
-sudo cp /tmp/proxygo-ca.crt /usr/local/share/ca-certificates/proxygo-ca.crt
+sudo proxygo-cli ca-export /usr/local/share/ca-certificates/proxygo-ca.crt
 sudo update-ca-certificates
 ```
 
 Para retirarla:
-
 ```bash
-sudo rm /usr/local/share/ca-certificates/proxygo-ca.crt
+sudo rm -f /usr/local/share/ca-certificates/proxygo-ca.crt
 sudo update-ca-certificates --fresh
 ```
 
-Esto cubre curl, wget y programas que usan el almacén del sistema. Firefox usa
-su propio almacén: Configuración → Privacidad y seguridad → Certificados →
-Ver certificados → Autoridades → Importar.
+Esto cubre `curl`, `wget` y herramientas que consultan `/etc/ssl/certs/ca-certificates.crt`. Firefox utiliza su propio almacén: **Configuración → Privacidad y seguridad → Certificados → Ver certificados → Autoridades → Importar**.
 
-## Instalar en Windows
+### Node.js y CLIs modernas (Claude Code, npm, undici, Python)
+Runtimes como Node.js incorporan su propio almacén de certificados raíz y no leen `/etc/ssl/certs` a menos que se indique `NODE_EXTRA_CA_CERTS`. Para usar herramientas basadas en Node.js (como Claude Code) a través de ProxyGo MITM sin errores `SSL certificate verification failed`, exporta las variables en la misma sesión de terminal:
 
-Como administrador:
+```bash
+export HTTP_PROXY="http://127.0.0.1:8080"
+export HTTPS_PROXY="http://127.0.0.1:8080"
+export http_proxy="http://127.0.0.1:8080"
+export https_proxy="http://127.0.0.1:8080"
+export NODE_EXTRA_CA_CERTS="/usr/local/share/ca-certificates/proxygo-ca.crt"
+export SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+export REQUESTS_CA_BUNDLE="/etc/ssl/certs/ca-certificates.crt"
+```
 
+*(Sustituye `8080` por `8088` si reasignaste el puerto del proxy en tu servidor.)*
+
+### Windows
+En una terminal como Administrador:
 ```cmd
 certutil -addstore -f "ROOT" proxygo-ca.crt
 ```
 
-También se puede usar `certmgr.msc` → Entidades de certificación raíz de
-confianza → Importar.
-
 Para retirarla:
-
 ```cmd
 certutil -delstore "ROOT" "ProxyGo Root CA"
 ```
+*(Sustituye `"ProxyGo Root CA"` por el nombre configurado en `PROXYGO_CA_ORG` si lo cambiaste, o elimínala desde `certmgr.msc` → Entidades de certificación raíz de confianza.)*
 
-Sustituya `ProxyGo Root CA` por el nombre real si cambió `PROXYGO_CA_ORG`.
-También puede eliminarse desde `certmgr.msc`.
-
-## Instalar en macOS
-
+### macOS
 En el llavero del sistema:
-
 ```bash
 sudo security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain /tmp/proxygo-ca.crt
 ```
 
 Para retirarla:
-
 ```bash
 sudo security delete-certificate -c "ProxyGo Root CA" \
   /Library/Keychains/System.keychain
 ```
 
-También puede hacerse desde Acceso a Llaveros → Sistema → Certificados. Si el
-navegador usa Firefox, impórtela en su almacén propio.
+---
 
-## Retirar la CA de ProxyGo
+## Retirar completamente la CA de ProxyGo
 
-1. Detenga el servicio:
+1. Detén los servicios:
    ```bash
    sudo proxygo-cli stop
    ```
-2. Retire la carpeta de la CA:
+2. Elimina la carpeta privada de la CA en el servidor:
    ```bash
    sudo rm -rf /var/lib/proxygo/ca
    ```
-3. Retire también el certificado de confianza de los dispositivos.
+3. Retira `proxygo-ca.crt` del almacén de confianza de los equipos cliente.
 
-Al arrancar de nuevo con MITM activo se generará una CA distinta. Los clientes
-deben retirar la anterior y confiar en la nueva.
+Al volver a iniciar ProxyGo con MITM activado se generará una CA completamente nueva.
+
+---
 
 ## Límites conocidos
 
-- Se anuncia solo HTTP/1.1 sobre TLS, tanto hacia el cliente como hacia el
-  servidor. Los clientes que exigen HTTP/2 pueden fallar; la mayoría negocia
-  HTTP/1.1.
-- Las aplicaciones con certificate pinning rechazarán la intercepción.
-- Solo se intercepta HTTP sobre TLS. Otros protocolos que usan `CONNECT` no
-  funcionan.
-- Los destinos privados, loopback y link-local están bloqueados por defecto.
-  `PROXYGO_BLOCK_PRIVATE_NETWORKS=false` permite esos destinos y aumenta el
-  riesgo de SSRF hacia servicios internos; multicast, direcciones no
-  especificadas y rangos reservados siguen bloqueados.
-- El comportamiento ante conexiones que no pueden inspeccionarse (pinning, mTLS,
-  WebSockets, SSE o fallos del motor) depende de `PROXYGO_SECURITY_POLICY`.
-- No exponga el puerto del proxy a Internet sin autenticación y firewall.
+- ProxyGo negocia **HTTP/1.1** sobre TLS tanto con el cliente como con el servidor de origen. Clientes que exijan exclusivamente HTTP/2 o HTTP/3/QUIC no se descifran como HTTP/1.1 y se gestionan según `PROXYGO_SECURITY_POLICY`.
+- Las aplicaciones con *certificate pinning* o mTLS (certificado de cliente) rechazarán la interceptación MITM.
+- Solo se inspecciona tráfico HTTP sobre TLS; otros protocolos arbitrarios sobre `CONNECT` no son soportados.
+- Los destinos privados, loopback y link-local están bloqueados por defecto (`PROXYGO_BLOCK_PRIVATE_NETWORKS=true`) para mitigar SSRF.
+- Nunca expongas el puerto del proxy ni el puerto del panel web directamente a redes públicas sin túnel cifrado (como SSH o Tailscale) y firewall.
